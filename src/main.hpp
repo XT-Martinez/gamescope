@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "gamescope_shared.h"
+#include <vector>
 
 extern const char *gamescope_optstring;
 extern const struct option *gamescope_options;
@@ -36,6 +37,7 @@ extern bool g_bGrabbed;
 
 extern float g_mouseSensitivity;
 extern const char *g_sOutputName;
+extern std::vector<uint32_t> g_customRefreshRates;
 
 enum class GamescopeUpscaleFilter : uint32_t
 {
