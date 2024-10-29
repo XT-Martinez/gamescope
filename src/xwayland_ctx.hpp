@@ -270,6 +270,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
 
 		Atom wm_protocols;
 		Atom wm_delete_window;
+		Atom gamescopeFrameHalveAtom;
 	} atoms;
 
 	bool HasQueuedEvents();
