@@ -183,6 +183,8 @@ bool g_bSteamIsActiveWindow = false;
 bool g_bForceInternal = false;
 bool b_bForceFrameLimit = false;
 bool g_bRefreshHalveEnable = false;
+bool g_bDPMS = false;
+bool g_bDPMS_set = false;
 
 namespace gamescope
 {
@@ -3099,7 +3101,7 @@ gamescope::ConVar<bool> cv_paint_cursor_plane{ "paint_cursor_plane", true };
 gamescope::ConVar<bool> cv_paint_mura_plane{ "paint_mura_plane", true };
 
 static void
-paint_all( global_focus_t *pFocus, bool async )
+paint_all(global_focus_t *pFocus, bool async, bool dpms)
 {
 	if ( !pFocus )
 		return;
@@ -3163,6 +3165,7 @@ paint_all( global_focus_t *pFocus, bool async )
 	frameInfo.eUpscaleFilter = pFocus->eUpscaleFilter;
 	frameInfo.eUpscaleScaler = pFocus->eUpscaleScaler;
 	frameInfo.nUpscaleSharpness = pFocus->nUpscaleSharpness;
+	frameInfo.dpms = dpms;
 
 	// If the window we'd paint as the base layer is the streaming client,
 	// find the video underlay and put it up first in the scenegraph
@@ -7769,6 +7772,10 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	{
 		g_bRefreshHalveEnable = !!get_prop( ctx, ctx->root, ctx->atoms.gamescopeFrameHalveAtom, 0 );
 	}
+	if (ev->atom == ctx->atoms.gamescopeDPMS)
+	{
+		g_bDPMS = !!get_prop(ctx, ctx->root, ctx->atoms.gamescopeDPMS, 0);
+	}
 }
 
 static int
@@ -9257,6 +9264,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 	ctx->atoms.wm_protocols = XInternAtom(ctx->dpy, "WM_PROTOCOLS", false);
 	ctx->atoms.wm_delete_window = XInternAtom(ctx->dpy, "WM_DELETE_WINDOW", false);
 	ctx->atoms.gamescopeFrameHalveAtom = XInternAtom( ctx->dpy, "GAMESCOPE_STEAMUI_HALFHZ", false );
+	ctx->atoms.gamescopeDPMS = XInternAtom(ctx->dpy, "GAMESCOPE_DPMS", false);
 
 	ctx->root_width = DisplayWidth(ctx->dpy, ctx->scr);
 	ctx->root_height = DisplayHeight(ctx->dpy, ctx->scr);
@@ -10920,10 +10928,14 @@ steamcompmgr_main(int argc, char **argv)
 				bShouldPaint = false;
 			}
 
+			if ( g_bDPMS != g_bDPMS_set && vblank )
+				bShouldPaint = true;
+
 			if ( bShouldPaint )
 			{
-				paint_all( pPaintFocus, eFlipType == FlipType::Async );
-
+				paint_all( pPaintFocus, eFlipType == FlipType::Async, g_bDPMS );
+				
+				g_bDPMS_set = g_bDPMS;
 				bPainted = true;
 			}
 		}

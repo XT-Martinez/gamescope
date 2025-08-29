@@ -309,6 +309,8 @@ struct FrameInfo_t
 	vec2_t focusedWindowScale = { 1.0f, 1.0f };
 	vec2_t focusedWindowOffset = { 0.0f, 0.0f };
 
+	bool dpms;
+
 	struct Layer_t
 	{
 		gamescope::Rc<CVulkanTexture> tex;
