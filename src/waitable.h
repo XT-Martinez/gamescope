@@ -185,6 +185,11 @@ namespace gamescope
             ArmTimer( 0ul, false );
         }
 
+        void OnPollIn()
+        {
+            IWaitable::Drain(m_nFD);
+        }
+
         int GetFD()
         {
             return m_nFD;
@@ -203,6 +208,7 @@ namespace gamescope
 
         void OnPollIn() final
         {
+            ITimerWaitable::OnPollIn();
             m_fnPollFunc();
         }
     private:
