@@ -578,6 +578,7 @@ extern std::string g_reshade_effect;
 
 bool drm_update_color_mgmt(struct drm_t *drm);
 bool drm_supports_color_mgmt(struct drm_t *drm);
+bool drm_supports_srgb_to_pq(struct drm_t *drm);
 bool drm_set_connector( struct drm_t *drm, gamescope::CDRMConnector *conn );
 
 struct drm_color_ctm2 {
@@ -3009,13 +3010,15 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 				}
 			}
 
-			if ( drm_supports_color_mgmt( drm ) )
+			if  ( drm_supports_srgb_to_pq( drm ) )
 			{
 				if (!cv_drm_debug_disable_blend_tf && !bSinglePlane)
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", drm->pending.output_tf );
 				else
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
-
+			}
+			if ( drm_supports_color_mgmt( drm ) )
+			{
 				if (!cv_drm_debug_disable_ctm && frameInfo->layers.get( i ).ctm != nullptr)
 					liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", frameInfo->layers.get( i ).ctm->GetBlobValue() );
 				else
@@ -3031,13 +3034,16 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 			liftoff_layer_unset_property( drm->lo_layers[ i ], "COLOR_RANGE" );
 			liftoff_layer_unset_property( drm->lo_layers[ i ], "pixel blend mode" );
 
+			if ( drm_supports_srgb_to_pq( drm ) )
+			{
+				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
+			}
 			if ( drm_supports_color_mgmt( drm ) )
 			{
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_DEGAMMA_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_SHAPER_LUT", 0 );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_SHAPER_TF", 0 );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_LUT3D", 0 );
-				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_BLEND_TF", AMDGPU_TRANSFER_FUNCTION_DEFAULT );
 				liftoff_layer_set_property( drm->lo_layers[ i ], "AMD_PLANE_CTM", 0 );
 			}
 		}
@@ -3238,7 +3244,7 @@ int drm_prepare( struct drm_t *drm, bool async, const struct FrameInfo_t *frameI
 
 	bool bSinglePlane = frameInfo->layers.count() < 2 && cv_drm_single_plane_optimizations;
 
-	if ( drm_supports_color_mgmt( &g_DRM ) && frameInfo->applyOutputColorMgmt )
+	if ( drm_supports_srgb_to_pq( &g_DRM ) && frameInfo->applyOutputColorMgmt )
 	{
 		if ( !cv_drm_debug_disable_output_tf && !bSinglePlane )
 		{
@@ -3814,7 +3820,20 @@ bool drm_supports_color_mgmt(struct drm_t *drm)
 	if ( !drm->pPrimaryPlane )
 		return false;
 
-	return drm->pPrimaryPlane->GetProperties().AMD_PLANE_CTM.has_value() && drm->pPrimaryPlane->GetProperties().AMD_PLANE_BLEND_TF.has_value();
+	return drm->pPrimaryPlane->GetProperties().AMD_PLANE_CTM.has_value() &&         // dm->dc->caps.color.mpc.gamut_remap
+			drm->pPrimaryPlane->GetProperties().AMD_PLANE_SHAPER_LUT.has_value() && // dpp_color_caps.hw_3d_lut
+			drm->pPrimaryPlane->GetProperties().AMD_PLANE_DEGAMMA_TF.has_value();   // dpp_color_caps.dgam_ram || dpp_color_caps.gamma_corr
+}
+
+bool drm_supports_srgb_to_pq(struct drm_t *drm)
+{
+	if ( g_bForceDisableColorMgmt )
+		return false;
+
+	if ( !drm->pPrimaryPlane )
+		return false;
+
+	return drm->pPrimaryPlane->GetProperties().AMD_PLANE_BLEND_TF.has_value(); // dpp_color_caps.ogam_ram
 }
 
 std::span<const uint32_t> drm_get_valid_refresh_rates( struct drm_t *drm )
@@ -3950,7 +3969,7 @@ namespace gamescope
 			if ( g_bOutputHDREnabled )
 			{
 				bNeedsFullComposite |= g_bHDRItmEnable;
-				if ( !SupportsColorManagement() )
+				if ( !SupportsSRGBtoPQ() )
 				{
 					bNeedsFullComposite |= ( pFrameInfo->layers.count() > 1 || pFrameInfo->layers.get( 0 ).colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ );
 					// Scanout can't apply the LUT-baked backlight dim here.
@@ -3959,7 +3978,7 @@ namespace gamescope
 			}
 			else
 			{
-				if ( !SupportsColorManagement() )
+				if ( !SupportsSRGBtoPQ() )
 					bNeedsFullComposite |= ColorspaceIsHDR( pFrameInfo->layers.get( 0 ).colorspace );
 			}
 
@@ -4370,6 +4389,11 @@ namespace gamescope
 		bool SupportsColorManagement() const
 		{
 			return drm_supports_color_mgmt( &g_DRM );
+		}
+
+		bool SupportsSRGBtoPQ() const
+		{
+			return drm_supports_srgb_to_pq( &g_DRM );
 		}
 
 		int Commit( const FrameInfo_t *pFrameInfo )
