@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <memory>
 #include <thread>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <atomic>
@@ -2291,6 +2292,26 @@ static void update_touch_scaling( const struct FrameInfo_t *frameInfo )
 #if HAVE_PIPEWIRE
 static void paint_pipewire()
 {
+	// Rate-limit PipeWire output to the consumer's requested max framerate,
+	// avoiding wasted GPU work from high-frequency overlay repaints
+	// (e.g. MangoHUD updating at display refresh rate).
+	// Uses deadline advancement (not wall-clock diff) to prevent framerate
+	// loss when vulkan_wait() causes vblank callbacks to be delayed.
+	static auto s_tNextPipewireFrame = std::chrono::steady_clock::time_point{};
+	auto tNow = std::chrono::steady_clock::now();
+	uint32_t nMaxFPS = pipewire_get_max_framerate();
+	if ( nMaxFPS == 0 )
+		nMaxFPS = 60; // fallback if consumer didn't advertise
+	auto frameInterval = std::chrono::microseconds( 1000000 / nMaxFPS );
+	if ( tNow < s_tNextPipewireFrame )
+		return;
+	// Advance deadline from previous deadline to maintain consistent rate.
+	// If we fell too far behind (e.g. stream paused), reset to avoid burst.
+	if ( tNow - s_tNextPipewireFrame > frameInterval * 2 )
+		s_tNextPipewireFrame = tNow + frameInterval;
+	else
+		s_tNextPipewireFrame += frameInterval;
+
 	static struct pipewire_buffer *s_pPipewireBuffer = nullptr;
 
 	// If the stream stopped/changed, and the underlying pw_buffer was thus
@@ -2310,15 +2331,35 @@ static void paint_pipewire()
 
 	struct FrameInfo_t frameInfo = {};
 	frameInfo.applyOutputColorMgmt = true;
-	frameInfo.outputEncodingEOTF   = EOTF_Gamma22;
 	frameInfo.allowVRR             = false;
 	frameInfo.bFadingOut           = false;
 
-	// Apply screenshot-style color management.
-	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+	// Use HDR (PQ/BT.2020) output when HDR is active and the consumer negotiated a 10-bit format,
+	// otherwise tonemap to SDR (Gamma 2.2 / BT.709).
+	// Tell PipeWire module about HDR state so it can renegotiate the stream format.
+	// When HDR is enabled, PipeWire will offer 10-bit xBGR_210LE; when disabled, only 8-bit BGRx.
+	pipewire_set_hdr(g_bOutputHDREnabled);
+
+	bool bHDRPipeWire = g_bOutputHDREnabled &&
+		s_pPipewireBuffer->video_info.format == SPA_VIDEO_FORMAT_xBGR_210LE;
+
+	if ( bHDRPipeWire )
 	{
-		frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut3d;
-		frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut1d;
+		frameInfo.outputEncodingEOTF = EOTF_PQ;
+		for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+		{
+			frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLutsHDR[nInputEOTF].vk_lut3d;
+			frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLutsHDR[nInputEOTF].vk_lut1d;
+		}
+	}
+	else
+	{
+		frameInfo.outputEncodingEOTF = EOTF_Gamma22;
+		for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+		{
+			frameInfo.lut3D[nInputEOTF]     = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut3d;
+			frameInfo.shaperLut[nInputEOTF] = g_ScreenshotColorMgmtLuts[nInputEOTF].vk_lut1d;
+		}
 	}
 
 	const uint64_t ulFocusAppId = s_pPipewireBuffer->gamescope_info.focus_appid;
@@ -2358,6 +2399,9 @@ static void paint_pipewire()
 		return;
 
 	// If the commits are the same as they were last time, don't repaint and don't push a new buffer on the stream.
+	// Only gate on focus + override (game content). Overlay commits (MangoHUD etc.)
+	// change at display refresh rate and would force unnecessary repaints.
+	// Overlays are still painted when a game frame triggers the repaint.
 	static uint64_t s_ulLastFocusCommitId = 0;
 	static uint64_t s_ulLastOverrideCommitId = 0;
 
@@ -2383,10 +2427,35 @@ static void paint_pipewire()
 	currentOutputHeight = uHeight;
 
 	// Paint the windows we have onto the Pipewire stream.
-	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, 0, 1.0f, pFocus->overrideWindow );
+	// Include all visible layers to match the display composition output.
+	// Use NoFilter (LINEAR) for the focus window — PipeWire doesn't need FSR/NIS upscaling.
+	paint_window( pFocus->focusWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
 
 	if ( pFocus->overrideWindow && !pFocus->focusWindow->isSteamStreamingClient )
 		paint_window( pFocus->overrideWindow, pFocus->focusWindow, &frameInfo, nullptr, PaintWindowFlag::NoFilter, 1.0f, pFocus->overrideWindow );
+
+	// Paint external overlay (MangoHUD/mangoapp) if visible
+	if ( pFocus->externalOverlayWindow && pFocus->externalOverlayWindow->opacity )
+	{
+		paint_window( pFocus->externalOverlayWindow, pFocus->externalOverlayWindow, &frameInfo, nullptr,
+			PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
+			( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
+	}
+
+	// Paint Steam overlay if visible
+	if ( pFocus->overlayWindow && pFocus->overlayWindow->opacity )
+	{
+		paint_window( pFocus->overlayWindow, pFocus->overlayWindow, &frameInfo, nullptr,
+			PaintWindowFlag::DrawBorders | PaintWindowFlag::NoFilter |
+			( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
+	}
+
+	// Paint notification windows if visible
+	if ( pFocus->notificationWindow && pFocus->notificationWindow->opacity )
+	{
+		paint_window( pFocus->notificationWindow, pFocus->notificationWindow, &frameInfo, nullptr,
+			PaintWindowFlag::NotificationMode | PaintWindowFlag::NoFilter );
+	}
 
 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
 		? vulkan_acquire_screenshot_texture( uWidth, uHeight, false, DRM_FORMAT_XRGB2101010 )
@@ -2396,8 +2465,6 @@ static void paint_pipewire()
 
 
 	std::optional<uint64_t> oPipewireSequence = vulkan_screenshot( &frameInfo, pRGBTexture, pYUVTexture );
-	// If we ever want the fat compositing path, use this.
-	//std::optional<uint64_t> oPipewireSequence = vulkan_composite( &frameInfo, s_pPipewireBuffer->texture, false, pRGBTexture, false );
 
 	g_uCompositeDebug = uCompositeDebugBackup;
 

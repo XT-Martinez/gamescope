@@ -12,6 +12,7 @@ struct pipewire_state {
 	struct pw_context *context;
 	struct pw_core *core;
 	bool running;
+	bool reconnecting;  // true during intentional disconnect for HDR renegotiation
 
 	struct pw_stream *stream;
 	uint32_t stream_node_id;
@@ -62,3 +63,5 @@ bool pipewire_is_streaming();
 void pipewire_destroy_buffer(struct pipewire_buffer *buffer);
 void push_pipewire_buffer(struct pipewire_buffer *buffer);
 void nudge_pipewire(void);
+void pipewire_set_hdr(bool active);
+uint32_t pipewire_get_max_framerate(void);

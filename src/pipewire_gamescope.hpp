@@ -9,7 +9,8 @@ enum {
 };
 
 enum {
-    SPA_META_requested_size_scale = 0x70000
+    SPA_META_requested_size_scale = 0x70000,
+    SPA_META_gamescope_hdr_active = 0x70001,
 };
 
 struct spa_gamescope

@@ -34,6 +34,13 @@ static uint32_t s_nCaptureHeight;
 static uint32_t s_nOutputWidth;
 static uint32_t s_nOutputHeight;
 
+// HDR state: set by steamcompmgr, triggers stream reconnect for format renegotiation
+static std::atomic<bool> s_bHDRActive{false};
+static std::atomic<bool> s_bNeedsHDRReneg{false};
+
+// Consumer-requested max framerate (from PipeWire format negotiation)
+static std::atomic<uint32_t> s_nMaxFramerate{0};
+
 static void destroy_buffer(struct pipewire_buffer *buffer) {
 	assert(buffer->buffer == nullptr);
 
@@ -159,6 +166,8 @@ static std::vector<const struct spa_pod *> build_format_params(struct spa_pod_bu
 {
 	std::vector<const struct spa_pod *> params;
 
+	if (s_bHDRActive.load())
+		build_format_params(builder, SPA_VIDEO_FORMAT_xBGR_210LE, params);
 	build_format_params(builder, SPA_VIDEO_FORMAT_BGRx, params);
 	build_format_params(builder, SPA_VIDEO_FORMAT_NV12, params);
 
@@ -280,7 +289,11 @@ static void dispatch_nudge(struct pipewire_state *state, int fd)
 		s_nOutputHeight = g_nOutputHeight;
 		calculate_capture_size();
 	}
-	if (s_nCaptureWidth != state->video_info.size.width || s_nCaptureHeight != state->video_info.size.height) {
+	bool bSizeChanged = (s_nCaptureWidth != state->video_info.size.width || s_nCaptureHeight != state->video_info.size.height);
+	bool bHDRChanged = s_bNeedsHDRReneg.exchange(false);
+
+	if (bSizeChanged && !bHDRChanged) {
+		// Size-only change: update params in-place (no format list change needed)
 		pwr_log.debugf("renegotiating stream params (size: %dx%d)", s_nCaptureWidth, s_nCaptureHeight);
 
 		uint8_t buf[4096];
@@ -290,6 +303,30 @@ static void dispatch_nudge(struct pipewire_state *state, int fd)
 		if (ret < 0) {
 			pwr_log.errorf("pw_stream_update_params failed");
 		}
+	}
+
+	if (bHDRChanged) {
+		// HDR state changed: disconnect and reconnect with new format list.
+		// This causes consumers (Sunshine) to see stream_dead and reinit with the new format.
+		pwr_log.infof("reconnecting stream for HDR change (hdr=%d)", s_bHDRActive.load());
+
+		state->reconnecting = true;
+		pw_stream_disconnect(state->stream);
+
+		// Process the disconnect events before reconnecting
+		pw_loop_iterate(state->loop, 0);
+
+		uint8_t buf[4096];
+		struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+		std::vector<const struct spa_pod *> format_params = build_format_params(&builder);
+
+		enum pw_stream_flags flags = (enum pw_stream_flags)(PW_STREAM_FLAG_DRIVER | PW_STREAM_FLAG_ALLOC_BUFFERS);
+		int ret = pw_stream_connect(state->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, format_params.data(), format_params.size());
+		if (ret < 0) {
+			pwr_log.errorf("pw_stream_connect failed during HDR reneg: %s", strerror(-ret));
+		}
+
+		state->reconnecting = false;
 	}
 
 	struct pipewire_buffer *buffer = in_buffer.exchange(nullptr);
@@ -331,7 +368,8 @@ static void stream_handle_state_changed(void *data, enum pw_stream_state old_str
 		break;
 	case PW_STREAM_STATE_ERROR:
 	case PW_STREAM_STATE_UNCONNECTED:
-		state->running = false;
+		if (!state->reconnecting)
+			state->running = false;
 		break;
 	default:
 		break;
@@ -355,6 +393,14 @@ static void stream_handle_param_changed(void *data, uint32_t id, const struct sp
 	s_nRequestedWidth = gamescope_info.requested_size.width;
 	s_nRequestedHeight = gamescope_info.requested_size.height;
 	calculate_capture_size();
+
+	// Store consumer-requested max framerate for rate-limiting paint_pipewire()
+	if (state->video_info.max_framerate.num > 0 && state->video_info.max_framerate.denom > 0) {
+		uint32_t fps = state->video_info.max_framerate.num / state->video_info.max_framerate.denom;
+		s_nMaxFramerate.store(fps);
+		pwr_log.infof("consumer requested max framerate: %u/%u (%u fps)",
+			state->video_info.max_framerate.num, state->video_info.max_framerate.denom, fps);
+	}
 
 	state->gamescope_info = gamescope_info;
 
@@ -445,6 +491,7 @@ uint32_t spa_format_to_drm(uint32_t spa_format)
 	switch (spa_format)
 	{
 		case SPA_VIDEO_FORMAT_NV12: return DRM_FORMAT_NV12;
+		case SPA_VIDEO_FORMAT_xBGR_210LE: return DRM_FORMAT_XRGB2101010;
 		default:
 		case SPA_VIDEO_FORMAT_BGR: return DRM_FORMAT_XRGB8888;
 	}
@@ -764,6 +811,20 @@ void push_pipewire_buffer(struct pipewire_buffer *buffer)
 		pwr_log.errorf_errno("push_pipewire_buffer: Already had a buffer?!");
 	}
 	nudge_pipewire();
+}
+
+void pipewire_set_hdr(bool active)
+{
+	bool old = s_bHDRActive.exchange(active);
+	if (old != active) {
+		s_bNeedsHDRReneg.store(true);
+		nudge_pipewire();
+	}
+}
+
+uint32_t pipewire_get_max_framerate(void)
+{
+	return s_nMaxFramerate.load();
 }
 
 void nudge_pipewire(void)
