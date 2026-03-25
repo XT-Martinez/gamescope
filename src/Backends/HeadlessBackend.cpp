@@ -2,6 +2,7 @@
 #include "rendervulkan.hpp"
 #include "wlserver.hpp"
 #include "refresh_rate.h"
+#include "steamcompmgr.hpp"
 
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
@@ -87,7 +88,18 @@ namespace gamescope
 
 		virtual int Present( const FrameInfo_t *pFrameInfo, bool bAsync ) override
 		{
-            return 0;
+			// Composite the frame to output images so scanout export can send it.
+			// Without this, the headless backend never produces frames for capture.
+			std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false );
+			if ( !oCompositeResult )
+				return -EINVAL;
+
+			vulkan_wait( *oCompositeResult, true );
+
+			GetVBlankTimer().UpdateWasCompositing( true );
+			GetVBlankTimer().UpdateLastDrawTime( get_time_in_nanos() - g_SteamCompMgrVBlankTime.ulWakeupTime );
+
+			return 0;
 		}
 
     private:
