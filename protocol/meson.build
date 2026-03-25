@@ -42,6 +42,7 @@ protocols = [
 	'gamescope-limiter.xml',
 	'gamescope-private.xml',
 	'gamescope-action-binding.xml',
+	'gamescope-scanout.xml',
 
 	# wlroots protocols
 	'wlr-layer-shell-unstable-v1.xml',
