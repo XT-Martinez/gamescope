@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <list>
+#include <chrono>
 #include <unordered_map>
 #include <optional>
 
@@ -191,6 +192,20 @@ struct wlserver_t {
 	std::vector<wl_resource*> gamescope_controls;
 	std::unordered_map< uint32_t, std::vector<wl_resource*> > app_perf_requests;
 
+	struct gamescope_scanout_client {
+		struct wl_resource *resource;
+		uint32_t max_fps;          // 0 = unlimited
+		bool prefer_hdr;
+		bool subscribed;
+		std::chrono::steady_clock::time_point next_frame_time;
+		std::set<uint32_t> outstanding_buffer_ids;
+		bool last_hdr_state;       // track HDR state changes
+		uint64_t last_focus_commit_id;
+		uint64_t last_override_commit_id;
+		uint32_t force_send_frames;  // bypass commit-skip for N frames after subscribe
+	};
+	std::vector<gamescope_scanout_client> gamescope_scanout_clients;
+
 	std::atomic<bool> bWaylandServerRunning = { false };
 
     // Share one single keymap and state between all connected physical keyboards
@@ -294,6 +309,8 @@ void wlserver_app_presented( uint32_t app_id, uint64_t frametime_ns );
 void wlserver_shutdown();
 
 void wlserver_send_gamescope_control( wl_resource *control );
+
+void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId );
 
 bool wlsession_active();
 

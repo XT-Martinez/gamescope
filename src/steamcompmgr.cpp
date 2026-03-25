@@ -8907,6 +8907,22 @@ steamcompmgr_main(int argc, char **argv)
 			if ( pipewire_is_streaming() )
 				paint_pipewire();
 #endif
+
+			// Scanout export: send frame to subscribed clients
+			// Pass commit IDs for per-client commit-skip (variable framerate)
+			if ( !wlserver.gamescope_scanout_clients.empty() )
+			{
+				global_focus_t *pScanoutFocus = GetCurrentFocus();
+				if ( pScanoutFocus && pScanoutFocus->focusWindow )
+				{
+					uint64_t ulFocusCommitId = window_last_done_commit_id( pScanoutFocus->focusWindow );
+					uint64_t ulOverrideCommitId = window_last_done_commit_id( pScanoutFocus->overrideWindow );
+
+					wlserver_lock();
+					wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId );
+					wlserver_unlock();
+				}
+			}
 		}
 
 		update_vrr_atoms(root_ctx, false, &flush_root);

@@ -52,9 +52,11 @@
 #include "gamescope-control-protocol.h"
 #include "gamescope-private-protocol.h"
 #include "gamescope-swapchain-protocol.h"
+#include "gamescope-scanout-protocol.h"
 #include "presentation-time-protocol.h"
 
 #include "wlserver.hpp"
+#include "rendervulkan.hpp"
 #include "hdmi.h"
 #include "main.hpp"
 #include "steamcompmgr.hpp"
@@ -1403,6 +1405,205 @@ static void create_gamescope_private( void )
 	wl_global_create( wlserver.display, &gamescope_private_interface, version, NULL, gamescope_private_bind );
 }
 
+////////////////////////
+// gamescope_scanout
+////////////////////////
+
+static void gamescope_scanout_handle_destroy( struct wl_client *client, struct wl_resource *resource )
+{
+	wl_resource_destroy( resource );
+}
+
+static void gamescope_scanout_handle_subscribe( struct wl_client *client, struct wl_resource *resource, uint32_t max_fps, uint32_t flags )
+{
+	for ( auto &sc : wlserver.gamescope_scanout_clients )
+	{
+		if ( sc.resource == resource )
+		{
+			sc.max_fps = max_fps;
+			sc.prefer_hdr = ( flags & GAMESCOPE_SCANOUT_SUBSCRIBE_FLAGS_PREFER_HDR ) != 0;
+			sc.subscribed = true;
+			sc.next_frame_time = std::chrono::steady_clock::now();
+			// Reset commit tracking so client gets the next frame immediately
+			sc.last_focus_commit_id = 0;
+			sc.last_override_commit_id = 0;
+			sc.outstanding_buffer_ids.clear();
+			sc.force_send_frames = 3;  // send first 3 frames regardless of commit-skip
+			return;
+		}
+	}
+}
+
+static void gamescope_scanout_handle_release_buffer( struct wl_client *client, struct wl_resource *resource, uint32_t buffer_id )
+{
+	for ( auto &sc : wlserver.gamescope_scanout_clients )
+	{
+		if ( sc.resource == resource )
+		{
+			sc.outstanding_buffer_ids.erase( buffer_id );
+			return;
+		}
+	}
+}
+
+static const struct gamescope_scanout_interface gamescope_scanout_impl = {
+	.destroy = gamescope_scanout_handle_destroy,
+	.subscribe = gamescope_scanout_handle_subscribe,
+	.release_buffer = gamescope_scanout_handle_release_buffer,
+};
+
+static void gamescope_scanout_bind( struct wl_client *client, void *data, uint32_t version, uint32_t id )
+{
+	struct wl_resource *resource = wl_resource_create( client, &gamescope_scanout_interface, version, id );
+	wl_resource_set_implementation( resource, &gamescope_scanout_impl, NULL,
+	[](struct wl_resource *resource)
+	{
+		std::erase_if( wlserver.gamescope_scanout_clients,
+			[=]( const wlserver_t::gamescope_scanout_client &sc ) { return sc.resource == resource; } );
+	});
+
+	wlserver_t::gamescope_scanout_client sc = {};
+	sc.resource = resource;
+	sc.max_fps = 0;
+	sc.prefer_hdr = false;
+	sc.subscribed = false;
+	sc.next_frame_time = std::chrono::steady_clock::now();
+	sc.last_hdr_state = false;
+	sc.last_focus_commit_id = 0;
+	sc.last_override_commit_id = 0;
+	sc.force_send_frames = 0;
+	wlserver.gamescope_scanout_clients.push_back( sc );
+}
+
+static void create_gamescope_scanout( void )
+{
+	wl_global_create( wlserver.display, &gamescope_scanout_interface, 1, NULL, gamescope_scanout_bind );
+}
+
+void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId )
+{
+	assert( wlserver_is_lock_held() );
+
+	// Quick check: any client that needs a new frame?
+	bool bAnyClientNeedsFrame = false;
+	for ( const auto &sc : wlserver.gamescope_scanout_clients )
+	{
+		if ( sc.subscribed &&
+		     ( sc.force_send_frames > 0 ||
+		       ulFocusCommitId != sc.last_focus_commit_id ||
+		       ulOverrideCommitId != sc.last_override_commit_id ) )
+		{
+			bAnyClientNeedsFrame = true;
+			break;
+		}
+	}
+	if ( !bAnyClientNeedsFrame )
+		return;
+
+	gamescope::Rc<CVulkanTexture> pTex = vulkan_get_last_output_image( false, false );
+	if ( !pTex )
+		return;
+
+	const struct wlr_dmabuf_attributes &dmabuf = pTex->dmabuf();
+	if ( dmabuf.n_planes == 0 )
+		return;
+
+	auto tNow = std::chrono::steady_clock::now();
+	struct timespec ts;
+	clock_gettime( CLOCK_MONOTONIC, &ts );
+	uint64_t timestamp_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+	uint32_t buffer_id = ( g_output.nOutImage + 2 ) % 3;
+
+	bool bHDR = g_bOutputHDREnabled;
+	uint32_t colorspace = bHDR ? GAMESCOPE_SCANOUT_COLORSPACE_HDR10_PQ : GAMESCOPE_SCANOUT_COLORSPACE_SDR_SRGB;
+
+	for ( auto &sc : wlserver.gamescope_scanout_clients )
+	{
+		if ( !sc.subscribed )
+			continue;
+
+		// Per-client commit-skip: only send when game content changes for THIS client
+		// Grace period: force-send first few frames after (re)subscribe to avoid
+		// green screen on Moonlight during encoder reinit (e.g. HDR toggle)
+		if ( sc.force_send_frames > 0 )
+		{
+			sc.force_send_frames--;
+		}
+		else if ( ulFocusCommitId == sc.last_focus_commit_id &&
+		          ulOverrideCommitId == sc.last_override_commit_id )
+		{
+			continue;
+		}
+
+		// Rate limiting
+		if ( sc.max_fps > 0 && tNow < sc.next_frame_time )
+			continue;
+
+		// Don't send if client holds too many unreleased buffers (max 2 of 3 triple-buffered)
+		if ( sc.outstanding_buffer_ids.size() >= 2 )
+			continue;
+
+		// Skip if we already sent this exact buffer
+		if ( sc.outstanding_buffer_ids.count( buffer_id ) )
+			continue;
+
+		// Send HDR metadata on change
+		if ( bHDR != sc.last_hdr_state )
+		{
+			sc.last_hdr_state = bHDR;
+			if ( bHDR && g_output.swapchainHDRMetadata )
+			{
+				const hdr_metadata_infoframe &inf = g_output.swapchainHDRMetadata->View<hdr_output_metadata>().hdmi_metadata_type1;
+				gamescope_scanout_send_hdr_metadata( sc.resource,
+					inf.display_primaries[0].x, inf.display_primaries[0].y,
+					inf.display_primaries[1].x, inf.display_primaries[1].y,
+					inf.display_primaries[2].x, inf.display_primaries[2].y,
+					inf.white_point.x, inf.white_point.y,
+					inf.max_display_mastering_luminance, inf.min_display_mastering_luminance,
+					inf.max_cll, inf.max_fall );
+			}
+		}
+
+		// Send frame event
+		gamescope_scanout_send_frame( sc.resource, buffer_id,
+			dmabuf.width, dmabuf.height, dmabuf.format,
+			(uint32_t)( dmabuf.modifier >> 32 ),
+			(uint32_t)( dmabuf.modifier & 0xFFFFFFFF ),
+			dmabuf.n_planes,
+			(uint32_t)( timestamp_ns >> 32 ),
+			(uint32_t)( timestamp_ns & 0xFFFFFFFF ),
+			colorspace );
+
+		// Send plane events (dup FDs - Wayland closes them after marshalling)
+		for ( int i = 0; i < dmabuf.n_planes; i++ )
+		{
+			int fd = dup( dmabuf.fd[i] );
+			if ( fd < 0 )
+				continue;
+			gamescope_scanout_send_plane( sc.resource, fd, dmabuf.stride[i], dmabuf.offset[i] );
+		}
+
+		// Send frame_done
+		gamescope_scanout_send_frame_done( sc.resource );
+
+		// Track buffer and commit state
+		sc.outstanding_buffer_ids.insert( buffer_id );
+		sc.last_focus_commit_id = ulFocusCommitId;
+		sc.last_override_commit_id = ulOverrideCommitId;
+
+		// Advance rate limiter
+		if ( sc.max_fps > 0 )
+		{
+			auto frameInterval = std::chrono::microseconds( 1000000 / sc.max_fps );
+			if ( tNow - sc.next_frame_time > frameInterval * 2 )
+				sc.next_frame_time = tNow + frameInterval;
+			else
+				sc.next_frame_time += frameInterval;
+		}
+	}
+}
+
 static void create_explicit_sync()
 {
 	new gamescope::WaylandServer::CLinuxDrmSyncobj( wlserver.display );
@@ -2015,6 +2216,8 @@ bool wlserver_init( void ) {
 	create_gamescope_control();
 
 	create_gamescope_private();
+
+	create_gamescope_scanout();
 
 	create_presentation_time();
 
