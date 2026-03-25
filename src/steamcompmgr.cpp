@@ -8910,18 +8910,24 @@ steamcompmgr_main(int argc, char **argv)
 
 			// Scanout export: send frame to subscribed clients
 			// Pass commit IDs for per-client commit-skip (variable framerate)
+			// When no window has focus (e.g. Steam still starting), send with
+			// commit IDs 0 so the force_send_frames grace period still delivers
+			// frames — this lets Sunshine's encoder probe succeed before any
+			// application has rendered.
 			if ( !wlserver.gamescope_scanout_clients.empty() )
 			{
 				global_focus_t *pScanoutFocus = GetCurrentFocus();
+				uint64_t ulFocusCommitId = 0;
+				uint64_t ulOverrideCommitId = 0;
 				if ( pScanoutFocus && pScanoutFocus->focusWindow )
 				{
-					uint64_t ulFocusCommitId = window_last_done_commit_id( pScanoutFocus->focusWindow );
-					uint64_t ulOverrideCommitId = window_last_done_commit_id( pScanoutFocus->overrideWindow );
-
-					wlserver_lock();
-					wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId );
-					wlserver_unlock();
+					ulFocusCommitId = window_last_done_commit_id( pScanoutFocus->focusWindow );
+					ulOverrideCommitId = window_last_done_commit_id( pScanoutFocus->overrideWindow );
 				}
+
+				wlserver_lock();
+				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId );
+				wlserver_unlock();
 			}
 		}
 
