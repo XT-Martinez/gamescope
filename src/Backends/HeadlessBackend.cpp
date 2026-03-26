@@ -1,4 +1,5 @@
 #include "backend.h"
+#include "Backends/DeferredBackend.h"  // GetSupportedSampleModifiers
 #include "rendervulkan.hpp"
 #include "wlserver.hpp"
 #include "refresh_rate.h"
@@ -199,11 +200,11 @@ namespace gamescope
 
 		virtual bool UsesModifiers() const override
 		{
-			return false;
+			return true;
 		}
 		virtual std::span<const uint64_t> GetSupportedModifiers( uint32_t uDrmFormat ) const override
 		{
-			return std::span<const uint64_t>{};
+			return GetSupportedSampleModifiers( uDrmFormat );
 		}
 
 		virtual IBackendConnector *GetCurrentConnector() override
