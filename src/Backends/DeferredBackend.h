@@ -422,7 +422,7 @@ namespace gamescope
         std::atomic<bool> m_bJustInittedPoll = { false };
 	};
 
-    IBackendFb *CDeferredFb::Unwrap()
+    inline IBackendFb *CDeferredFb::Unwrap()
     {
         assert( m_pDeferredBackend->IsChildInitted() );
 
