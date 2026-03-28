@@ -237,6 +237,22 @@ namespace gamescope
 							}
 						}
 						closedir( d );
+
+						// Remove stale entries: if a known device no longer exists
+						// in /dev/input/, remove it from the set so it gets re-added
+						// when Moonlight reconnects and Sunshine recreates it.
+						for ( auto it = knownDevices.begin(); it != knownDevices.end(); )
+						{
+							char checkPath[PATH_MAX];
+							snprintf( checkPath, sizeof(checkPath), "/dev/input/%s", it->c_str() );
+							if ( access( checkPath, F_OK ) != 0 )
+							{
+								fprintf( stderr, "[headless] removed stale device: /dev/input/%s\n", it->c_str() );
+								it = knownDevices.erase( it );
+							}
+							else
+								++it;
+						}
 					}
 
 					// Dispatch pending events
