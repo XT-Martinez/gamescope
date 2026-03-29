@@ -46,6 +46,7 @@
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/util/region.h>
 #include "wlr_end.hpp"
 
@@ -2482,6 +2483,112 @@ void wlserver_set_keyboard_layout( const char *pszLayout )
 	cv_xkb_layout = std::string{ pszLayout };
 }
 
+static void handle_output_manager_apply(struct wl_listener *listener, void *data)
+{
+	struct wlr_output_configuration_v1 *config = (struct wlr_output_configuration_v1 *)data;
+
+	// Walk through the requested head configurations
+	struct wlr_output_configuration_head_v1 *head;
+	wl_list_for_each(head, &config->heads, link)
+	{
+		int32_t width, height, refresh_mhz;
+
+		if ( head->state.mode )
+		{
+			width = head->state.mode->width;
+			height = head->state.mode->height;
+			refresh_mhz = head->state.mode->refresh;
+		}
+		else
+		{
+			width = head->state.custom_mode.width;
+			height = head->state.custom_mode.height;
+			refresh_mhz = head->state.custom_mode.refresh;
+		}
+
+		if ( width <= 0 || height <= 0 )
+		{
+			wl_log.errorf( "Output manager: invalid mode %dx%d", width, height );
+			wlr_output_configuration_v1_send_failed( config );
+			wlr_output_configuration_v1_destroy( config );
+			return;
+		}
+
+		// Default refresh to 60Hz if not specified
+		if ( refresh_mhz <= 0 )
+			refresh_mhz = 60000;
+
+		wl_log.infof( "Output manager: applying mode %dx%d@%dmHz",
+			width, height, refresh_mhz );
+
+		// Commit the mode to the wlr_output so the protocol state is consistent
+		struct wlr_output_state output_state;
+		wlr_output_state_init( &output_state );
+		wlr_output_state_set_custom_mode( &output_state, width, height, refresh_mhz );
+		if ( !wlr_output_commit_state( head->state.output, &output_state ) )
+		{
+			wl_log.errorf( "Output manager: failed to commit output state" );
+			wlr_output_state_finish( &output_state );
+			wlr_output_configuration_v1_send_failed( config );
+			wlr_output_configuration_v1_destroy( config );
+			return;
+		}
+		wlr_output_state_finish( &output_state );
+
+		// Store pending mode change for compositor thread to pick up.
+		// Use release ordering so the width/height/refresh writes are
+		// visible before the flag is observed by PollState().
+		wlserver.pending_output_mode.width = (uint32_t)width;
+		wlserver.pending_output_mode.height = (uint32_t)height;
+		wlserver.pending_output_mode.refresh_mhz = refresh_mhz;
+		wlserver.pending_output_mode.pending.store( true, std::memory_order_release );
+	}
+
+	wlr_output_configuration_v1_send_succeeded( config );
+	wlr_output_configuration_v1_destroy( config );
+}
+
+static void handle_output_manager_test(struct wl_listener *listener, void *data)
+{
+	struct wlr_output_configuration_v1 *config = (struct wlr_output_configuration_v1 *)data;
+
+	// Headless backend can render any resolution — always succeed tests
+	wlr_output_configuration_v1_send_succeeded( config );
+	wlr_output_configuration_v1_destroy( config );
+}
+
+void wlserver_update_output_manager( void )
+{
+	if ( !wlserver.output_manager )
+		return;
+
+	struct wlr_output_configuration_v1 *config = wlr_output_configuration_v1_create();
+	if ( !config )
+		return;
+
+	// Advertise server 0's output as the compositor output
+	if ( !wlserver.wlr.xwayland_servers.empty() )
+	{
+		gamescope_xwayland_server_t *server = wlserver.wlr.xwayland_servers[0].get();
+		if ( server )
+		{
+			struct wlr_output *output = server->get_output();
+			struct wlr_output_configuration_head_v1 *head =
+				wlr_output_configuration_head_v1_create( config, output );
+			if ( head )
+			{
+				head->state.enabled = true;
+				head->state.mode = NULL;
+				head->state.custom_mode.width = g_nOutputWidth;
+				head->state.custom_mode.height = g_nOutputHeight;
+				head->state.custom_mode.refresh = g_nOutputRefresh;
+			}
+		}
+	}
+
+	wlr_output_manager_v1_set_configuration( wlserver.output_manager, config );
+}
+
 bool wlserver_init( void ) {
 	assert( wlserver.display != nullptr );
 
@@ -2581,6 +2688,16 @@ bool wlserver_init( void ) {
 	wl_signal_add(&wlserver.constraints->events.new_constraint, &wlserver.new_pointer_constraint);
 
 	wlr_data_device_manager_create(wlserver.display);
+	wlserver.output_manager = wlr_output_manager_v1_create(wlserver.display);
+	if ( !wlserver.output_manager )
+	{
+		wl_log.errorf( "Failed to create output manager" );
+		return false;
+	}
+	wlserver.output_manager_apply.notify = handle_output_manager_apply;
+	wl_signal_add(&wlserver.output_manager->events.apply, &wlserver.output_manager_apply);
+	wlserver.output_manager_test.notify = handle_output_manager_test;
+	wl_signal_add(&wlserver.output_manager->events.test, &wlserver.output_manager_test);
 
 	wlserver.xdg_shell = wlr_xdg_shell_create(wlserver.display, 3);
 	if (!wlserver.xdg_shell)
@@ -2680,6 +2797,9 @@ bool wlserver_init( void ) {
 			}
 		}
 	}
+
+	// Broadcast initial output configuration to wlr-output-management clients
+	wlserver_update_output_manager();
 
 	return true;
 }

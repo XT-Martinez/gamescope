@@ -10510,6 +10510,7 @@ steamcompmgr_main(int argc, char **argv)
 		{
 			hasRepaint = true;
 
+			update_vrr_atoms(root_ctx, false, &flush_root);
 			update_mode_atoms(root_ctx, &flush_root);
 			update_edid_prop();
 		}
