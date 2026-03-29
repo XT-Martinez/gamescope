@@ -3,6 +3,7 @@
 #include "wlserver.hpp"
 #include "refresh_rate.h"
 #include "steamcompmgr.hpp"
+#include "color_helpers.h"
 
 #include <libinput.h>
 #include <dirent.h>
@@ -15,6 +16,9 @@
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
 
+// HDR support can be enabled via --hdr-enabled flag
+extern bool g_bForceHDR10OutputDebug;
+
 namespace gamescope
 {
     class CHeadlessConnector final : public CBaseBackendConnector
@@ -22,6 +26,14 @@ namespace gamescope
     public:
         CHeadlessConnector()
         {
+            if ( g_bForceHDR10OutputDebug )
+            {
+                m_HDRInfo.bExposeHDRSupport = true;
+                m_HDRInfo.eOutputEncodingEOTF = EOTF_PQ;
+                m_HDRInfo.uMaxContentLightLevel = nits_to_u16( 1000.0f );
+                m_HDRInfo.uMaxFrameAverageLuminance = nits_to_u16( 800.0f );
+                m_HDRInfo.uMinContentLightLevel = nits_to_u16_dark( 0.01f );
+            }
         }
         virtual ~CHeadlessConnector()
         {
@@ -37,11 +49,11 @@ namespace gamescope
         }
         virtual bool SupportsHDR() const override
         {
-            return false;
+            return m_HDRInfo.IsHDR10();
         }
         virtual bool IsHDRActive() const override
         {
-            return false;
+            return g_bForceHDR10OutputDebug;
         }
         virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
         {
@@ -75,10 +87,20 @@ namespace gamescope
             displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
             displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
         {
-			*displayColorimetry = displaycolorimetry_709;
-			*displayEOTF = EOTF_Gamma22;
-			*outputEncodingColorimetry = displaycolorimetry_709;
-			*outputEncodingEOTF = EOTF_Gamma22;
+			if ( g_bForceHDR10OutputDebug )
+			{
+				*displayColorimetry = displaycolorimetry_2020;
+				*displayEOTF = EOTF_PQ;
+				*outputEncodingColorimetry = displaycolorimetry_2020;
+				*outputEncodingEOTF = EOTF_PQ;
+			}
+			else
+			{
+				*displayColorimetry = displaycolorimetry_709;
+				*displayEOTF = EOTF_Gamma22;
+				*outputEncodingColorimetry = displaycolorimetry_709;
+				*outputEncodingEOTF = EOTF_Gamma22;
+			}
         }
 
         virtual const char *GetName() const override
