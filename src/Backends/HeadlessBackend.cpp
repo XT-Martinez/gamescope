@@ -91,6 +91,8 @@ namespace gamescope
         {
             if ( !g_customRefreshRates.empty() )
                 return std::span<const uint32_t>{ g_customRefreshRates.data(), g_customRefreshRates.size() };
+            if ( !m_FallbackRefreshRates.empty() )
+                return std::span<const uint32_t>{ m_FallbackRefreshRates.data(), m_FallbackRefreshRates.size() };
             return std::span<const uint32_t>{};
         }
 
@@ -148,6 +150,9 @@ namespace gamescope
         BackendConnectorHDRInfo m_HDRInfo{};
         BackendMode m_CurrentMode{};
         std::vector<uint8_t> m_Edid;
+        std::vector<uint32_t> m_FallbackRefreshRates;
+
+        friend class CHeadlessBackend;
     };
 
 	class CHeadlessBackend final : public CBaseBackend
@@ -188,6 +193,29 @@ namespace gamescope
 
 			m_Connector.UpdateMode( g_nOutputWidth, g_nOutputHeight,
 				ConvertmHzToHz( (uint32_t)g_nOutputRefresh ) );
+
+			// If --custom-refresh-rates wasn't passed, parse CUSTOM_REFRESH_RATES
+			// env var as a fallback (gamescope-session-plus may not forward it).
+			if ( g_customRefreshRates.empty() )
+			{
+				const char *pszRates = getenv( "CUSTOM_REFRESH_RATES" );
+				if ( pszRates && *pszRates )
+				{
+					char *pszCopy = strdup( pszRates );
+					char *token = strtok( pszCopy, "," );
+					while ( token )
+					{
+						int rate = atoi( token );
+						if ( rate > 0 )
+							m_Connector.m_FallbackRefreshRates.push_back( (uint32_t)rate );
+						token = strtok( nullptr, "," );
+					}
+					free( pszCopy );
+					if ( !m_Connector.m_FallbackRefreshRates.empty() )
+						fprintf( stderr, "[headless] parsed %zu refresh rates from CUSTOM_REFRESH_RATES env\n",
+							m_Connector.m_FallbackRefreshRates.size() );
+				}
+			}
 
 			if ( !vulkan_init( vulkan_get_instance(), VK_NULL_HANDLE ) )
 			{
