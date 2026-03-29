@@ -27,6 +27,8 @@
 #define HAVE_SESSION 1
 #endif
 
+struct wlr_output_manager_v1;
+
 #define WLSERVER_BUTTON_COUNT 7
 
 struct _XDisplay;
@@ -180,6 +182,9 @@ struct wlserver_t {
 	struct wlr_layer_shell_v1 *layer_shell_v1;
 	struct wlr_relative_pointer_manager_v1 *relative_pointer_manager;
 	struct wlr_pointer_constraints_v1 *constraints;
+	struct wlr_output_manager_v1 *output_manager;
+	struct wl_listener output_manager_apply;
+	struct wl_listener output_manager_test;
 	struct wl_listener new_xdg_surface;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_layer_shell_surface;
@@ -205,6 +210,15 @@ struct wlserver_t {
 		uint32_t force_send_frames;  // bypass commit-skip for N frames after subscribe
 	};
 	std::vector<gamescope_scanout_client> gamescope_scanout_clients;
+
+	// Pending output mode change from wlr-output-management protocol.
+	// Set by wayland thread, consumed by compositor thread in PollState().
+	struct {
+		std::atomic<bool> pending{false};
+		uint32_t width = 0;
+		uint32_t height = 0;
+		int32_t refresh_mhz = 0;
+	} pending_output_mode;
 
 	std::atomic<bool> bWaylandServerRunning = { false };
 
@@ -290,6 +304,7 @@ void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gam
 void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf );
 
 void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh );
+void wlserver_update_output_manager( void );
 
 extern std::atomic<bool> g_bPendingTouchMovement;
 

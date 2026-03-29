@@ -1,9 +1,11 @@
 #include "backend.h"
+#include "main.hpp"
 #include "rendervulkan.hpp"
 #include "wlserver.hpp"
 #include "refresh_rate.h"
 #include "steamcompmgr.hpp"
 #include "color_helpers.h"
+#include "edid.h"
 
 #include <libinput.h>
 #include <dirent.h>
@@ -16,8 +18,9 @@
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
 
-// HDR support can be enabled via --hdr-enabled flag
 extern bool g_bForceHDR10OutputDebug;
+extern int g_nDynamicRefreshHz;
+extern gamescope::ConVar<bool> cv_hdr_enabled;
 
 namespace gamescope
 {
@@ -26,14 +29,21 @@ namespace gamescope
     public:
         CHeadlessConnector()
         {
-            if ( g_bForceHDR10OutputDebug )
-            {
-                m_HDRInfo.bExposeHDRSupport = true;
-                m_HDRInfo.eOutputEncodingEOTF = EOTF_PQ;
-                m_HDRInfo.uMaxContentLightLevel = nits_to_u16( 1000.0f );
-                m_HDRInfo.uMaxFrameAverageLuminance = nits_to_u16( 800.0f );
-                m_HDRInfo.uMinContentLightLevel = nits_to_u16_dark( 0.01f );
-            }
+            // Headless display always advertises HDR capability.
+            // Whether HDR is used is controlled by cv_hdr_enabled at the compositor level.
+            m_HDRInfo.bExposeHDRSupport = true;
+            m_HDRInfo.eOutputEncodingEOTF = EOTF_PQ;
+            m_HDRInfo.uMaxContentLightLevel = nits_to_u16( 1000.0f );
+            m_HDRInfo.uMaxFrameAverageLuminance = nits_to_u16( 800.0f );
+            m_HDRInfo.uMinContentLightLevel = nits_to_u16_dark( 0.01f );
+        }
+
+        void UpdateMode( uint32_t uWidth, uint32_t uHeight, uint32_t uRefreshHz )
+        {
+            m_CurrentMode.uWidth = uWidth;
+            m_CurrentMode.uHeight = uHeight;
+            m_CurrentMode.uRefresh = uRefreshHz;
+            m_Edid = GenerateSimpleEdid( uWidth, uHeight );
         }
         virtual ~CHeadlessConnector()
         {
@@ -53,7 +63,7 @@ namespace gamescope
         }
         virtual bool IsHDRActive() const override
         {
-            return g_bForceHDR10OutputDebug;
+            return g_bOutputHDREnabled;
         }
         virtual const BackendConnectorHDRInfo &GetHDRInfo() const override
         {
@@ -65,7 +75,7 @@ namespace gamescope
 		}
         virtual std::span<const BackendMode> GetModes() const override
         {
-            return std::span<const BackendMode>{};
+            return std::span<const BackendMode>{ &m_CurrentMode, 1 };
         }
 
         virtual bool SupportsVRR() const override
@@ -75,10 +85,12 @@ namespace gamescope
 
         virtual std::span<const uint8_t> GetRawEDID() const override
         {
-            return std::span<const uint8_t>{};
+            return std::span<const uint8_t>{ m_Edid.data(), m_Edid.size() };
         }
         virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const override
         {
+            if ( !g_customRefreshRates.empty() )
+                return std::span<const uint32_t>{ g_customRefreshRates.data(), g_customRefreshRates.size() };
             return std::span<const uint32_t>{};
         }
 
@@ -134,6 +146,8 @@ namespace gamescope
 
     private:
         BackendConnectorHDRInfo m_HDRInfo{};
+        BackendMode m_CurrentMode{};
+        std::vector<uint8_t> m_Edid;
     };
 
 	class CHeadlessBackend final : public CBaseBackend
@@ -172,6 +186,9 @@ namespace gamescope
 			if ( g_nOutputRefresh == 0 )
 				g_nOutputRefresh = ConvertHztomHz( 60 );
 
+			m_Connector.UpdateMode( g_nOutputWidth, g_nOutputHeight,
+				ConvertmHzToHz( (uint32_t)g_nOutputRefresh ) );
+
 			if ( !vulkan_init( vulkan_get_instance(), VK_NULL_HANDLE ) )
 			{
 				return false;
@@ -188,6 +205,9 @@ namespace gamescope
 
 		virtual bool PostInit() override
 		{
+			// Write initial EDID so Steam can detect display capabilities (HDR, etc.)
+			HackUpdatePatchedEdid();
+
 			// Initialize path-based libinput (no udev daemon needed) and
 			// start a background thread that polls /dev/input/ for new
 			// virtual devices created by Sunshine via uinput.
@@ -402,7 +422,33 @@ namespace gamescope
 
 		virtual bool PollState() override
 		{
-			return false;
+			if ( !wlserver.pending_output_mode.pending.load( std::memory_order_acquire ) )
+				return false;
+
+			uint32_t width = wlserver.pending_output_mode.width;
+			uint32_t height = wlserver.pending_output_mode.height;
+			int32_t refresh_mhz = wlserver.pending_output_mode.refresh_mhz;
+			wlserver.pending_output_mode.pending.store( false, std::memory_order_relaxed );
+
+			fprintf( stderr, "[headless] applying dynamic mode: %ux%u@%dHz\n",
+				width, height, gamescope::ConvertmHzToHz( refresh_mhz ) );
+
+			g_nOutputWidth = width;
+			g_nOutputHeight = height;
+			g_nOutputRefresh = refresh_mhz;
+
+			m_Connector.UpdateMode( width, height,
+				gamescope::ConvertmHzToHz( (uint32_t)refresh_mhz ) );
+
+			vulkan_remake_output_images();
+
+			wlserver_lock();
+			for ( size_t i = 0; i < wlserver.wlr.xwayland_servers.size(); i++ )
+				wlserver_set_xwayland_server_mode( i, width, height, refresh_mhz );
+			wlserver_update_output_manager();
+			wlserver_unlock();
+
+			return true;
 		}
 
 		virtual std::shared_ptr<BackendBlob> CreateBackendBlob( const std::type_info &type, std::span<const uint8_t> data ) override
@@ -481,11 +527,39 @@ namespace gamescope
 
 		virtual bool HackTemporarySetDynamicRefresh( int nRefresh ) override
 		{
-			return false;
+			if ( nRefresh <= 0 )
+				return false;
+
+			int32_t nRefreshmHz = ConvertHztomHz( nRefresh );
+			if ( nRefreshmHz == g_nOutputRefresh )
+				return true;
+
+			g_nOutputRefresh = nRefreshmHz;
+			g_nDynamicRefreshHz = nRefresh;
+
+			m_Connector.UpdateMode( g_nOutputWidth, g_nOutputHeight, (uint32_t)nRefresh );
+
+			wlserver_lock();
+			for ( size_t i = 0; i < wlserver.wlr.xwayland_servers.size(); i++ )
+				wlserver_set_xwayland_server_mode( i, g_nOutputWidth, g_nOutputHeight, nRefreshmHz );
+			wlserver_update_output_manager();
+			wlserver_unlock();
+
+			return true;
 		}
 
 		virtual void HackUpdatePatchedEdid() override
 		{
+			if ( !GetCurrentConnector() )
+				return;
+
+			if ( cv_hdr_enabled && GetCurrentConnector()->GetHDRInfo().bExposeHDRSupport )
+				setenv( "DXVK_HDR", "1", true );
+			else
+				setenv( "DXVK_HDR", "0", true );
+
+			WritePatchedEdid( GetCurrentConnector()->GetRawEDID(),
+				GetCurrentConnector()->GetHDRInfo(), false );
 		}
 
 	protected:
