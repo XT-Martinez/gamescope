@@ -229,6 +229,7 @@ struct wlserver_t {
 		bool last_hdr_state;       // track HDR state changes
 		uint64_t last_focus_commit_id;
 		uint64_t last_override_commit_id;
+		uint32_t last_input_counter;
 		uint32_t force_send_frames;  // bypass commit-skip for N frames after subscribe
 	};
 	std::vector<gamescope_scanout_client> gamescope_scanout_clients;
@@ -363,7 +364,7 @@ void wlserver_send_gamescope_control( wl_resource *control );
 void wlserver_set_frame_limiter_state( uint32_t uState );
 uint32_t wlserver_get_frame_limiter_state( void );
 void wlserver_flush_frame_limiter_state( void );
-void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId );
+void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId, uint32_t uInputCounter );
 
 bool wlsession_active();
 
