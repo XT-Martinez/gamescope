@@ -8927,7 +8927,7 @@ steamcompmgr_main(int argc, char **argv)
 				}
 
 				wlserver_lock();
-				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId );
+				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId, inputCounter );
 				wlserver_unlock();
 			}
 		}
