@@ -140,6 +140,23 @@ bool g_bWasPartialComposite = false;
 
 bool ShouldDrawCursor();
 
+static constexpr uint64_t k_ulScanoutCursorRepaintWindow = 200'000'000ull;
+
+static bool ShouldForceScanoutCursorRepaint()
+{
+	if ( !wlserver_has_active_gamescope_scanout_client() )
+		return false;
+
+	if ( !ShouldDrawCursor() || wlserver.bCursorHidden || !wlserver.bCursorHasImage )
+		return false;
+
+	uint64_t ulLastMovedCursorTime = wlserver.ulLastMovedCursorTime;
+	if ( ulLastMovedCursorTime == 0 )
+		return false;
+
+	return get_time_in_nanos() - ulLastMovedCursorTime <= k_ulScanoutCursorRepaintWindow;
+}
+
 std::atomic<uint32_t> g_unCurrentVRSceneAppId;
 std::atomic<uint64_t> g_FocusedVROverlayMouse;
 std::atomic<uint64_t> g_FocusedVROverlayKeyboard;
@@ -10940,13 +10957,9 @@ steamcompmgr_main(int argc, char **argv)
 					{
 						bShouldPaint = vblank && ( hasRepaint || hasRepaintNonBasePlane || bForceSyncFlip );
 
-						// Scanout export: always paint on VBlank when clients are subscribed.
-						// Without this, the headless backend only composites when the focused
-						// window commits new content (~70fps for Steam Big Picture), leaving
-						// nOutImage stale and causing dupbuf skips in the scanout export path.
-						// Compositing on every VBlank ensures buffer_id advances each frame,
-						// giving consistent framerate delivery to Sunshine.
-						if ( vblank && !bShouldPaint && !wlserver.gamescope_scanout_clients.empty() )
+						// Keep software cursor movement smooth for active scanout clients,
+						// but don't repaint static scenes just because a stream is connected.
+						if ( vblank && !bShouldPaint && ShouldForceScanoutCursorRepaint() )
 							bShouldPaint = true;
 
 						break;
@@ -11055,7 +11068,7 @@ steamcompmgr_main(int argc, char **argv)
 			// commit IDs 0 so the force_send_frames grace period still delivers
 			// frames — this lets Sunshine's encoder probe succeed before any
 			// application has rendered.
-			if ( !wlserver.gamescope_scanout_clients.empty() )
+			if ( wlserver_has_active_gamescope_scanout_client() )
 			{
 				global_focus_t *pScanoutFocus = GetCurrentFocus();
 				uint64_t ulFocusCommitId = 0;
