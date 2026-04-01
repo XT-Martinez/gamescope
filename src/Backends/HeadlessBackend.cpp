@@ -7,6 +7,7 @@
 #include "color_helpers.h"
 #include "edid.h"
 
+#include <algorithm>
 #include <libinput.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -188,11 +189,6 @@ namespace gamescope
 			}
 			if ( g_nOutputWidth == 0 )
 				g_nOutputWidth = g_nOutputHeight * 16 / 9;
-			if ( g_nOutputRefresh == 0 )
-				g_nOutputRefresh = ConvertHztomHz( 60 );
-
-			m_Connector.UpdateMode( g_nOutputWidth, g_nOutputHeight,
-				ConvertmHzToHz( (uint32_t)g_nOutputRefresh ) );
 
 			// If --custom-refresh-rates wasn't passed, parse CUSTOM_REFRESH_RATES
 			// env var as a fallback (gamescope-session-plus may not forward it).
@@ -216,6 +212,25 @@ namespace gamescope
 							m_Connector.m_FallbackRefreshRates.size() );
 				}
 			}
+
+			if ( g_nOutputRefresh == 0 )
+			{
+				auto validRefreshRates = m_Connector.GetValidDynamicRefreshRates();
+				if ( !validRefreshRates.empty() )
+				{
+					uint32_t uInitialRefreshHz = *std::max_element( validRefreshRates.begin(), validRefreshRates.end() );
+					g_nOutputRefresh = ConvertHztomHz( uInitialRefreshHz );
+					fprintf( stderr, "[headless] using initial refresh %uHz from configured dynamic refresh rates\n",
+						uInitialRefreshHz );
+				}
+				else
+				{
+					g_nOutputRefresh = ConvertHztomHz( 60 );
+				}
+			}
+
+			m_Connector.UpdateMode( g_nOutputWidth, g_nOutputHeight,
+				ConvertmHzToHz( (uint32_t)g_nOutputRefresh ) );
 
 			if ( !vulkan_init( vulkan_get_instance(), VK_NULL_HANDLE ) )
 			{
@@ -262,70 +277,74 @@ namespace gamescope
 			m_bInputThreadRunning = true;
 			m_InputThread = std::thread( [this]() {
 				std::set<std::string> knownDevices;
+				auto scan_devices = [&]() {
+					DIR *d = opendir( "/dev/input" );
+					if ( !d )
+						return;
+
+					struct dirent *ent;
+					while ( ( ent = readdir( d ) ) )
+					{
+						if ( strncmp( ent->d_name, "event", 5 ) != 0 )
+							continue;
+
+						std::string name( ent->d_name );
+						if ( knownDevices.count( name ) )
+							continue;
+
+						// Check if this is a container device by reading phys
+						char physPath[PATH_MAX];
+						snprintf( physPath, sizeof(physPath),
+							"/sys/class/input/%s/device/phys", ent->d_name );
+						FILE *f = fopen( physPath, "r" );
+						if ( !f )
+							continue;
+						char phys[256] = {};
+						if ( !fgets( phys, sizeof(phys), f ) ) { fclose(f); continue; }
+						fclose( f );
+						// Strip newline
+						char *nl = strchr( phys, '\n' );
+						if ( nl ) *nl = '\0';
+
+						if ( strncmp( phys, "container-", 10 ) != 0 )
+							continue;
+
+						char devPath[PATH_MAX];
+						snprintf( devPath, sizeof(devPath), "/dev/input/%s", ent->d_name );
+
+						struct libinput_device *dev = libinput_path_add_device( m_pPathLibInput, devPath );
+						if ( dev )
+						{
+							fprintf( stderr, "[headless] added input device: %s (%s)\n", devPath, phys );
+							knownDevices.insert( name );
+						}
+					}
+					closedir( d );
+
+					// Remove stale entries: if a known device no longer exists
+					// in /dev/input/, remove it from the set so it gets re-added
+					// when Moonlight reconnects and Sunshine recreates it.
+					for ( auto it = knownDevices.begin(); it != knownDevices.end(); )
+					{
+						char checkPath[PATH_MAX];
+						snprintf( checkPath, sizeof(checkPath), "/dev/input/%s", it->c_str() );
+						if ( access( checkPath, F_OK ) != 0 )
+						{
+							fprintf( stderr, "[headless] removed stale device: /dev/input/%s\n", it->c_str() );
+							it = knownDevices.erase( it );
+						}
+						else
+						{
+							++it;
+						}
+					}
+				};
+
+				const auto scanInterval = std::chrono::milliseconds( 500 );
+				auto tNextScan = std::chrono::steady_clock::now();
 
 				while ( m_bInputThreadRunning )
 				{
-					// Scan for new devices
-					DIR *d = opendir( "/dev/input" );
-					if ( d )
-					{
-						struct dirent *ent;
-						while ( ( ent = readdir( d ) ) )
-						{
-							if ( strncmp( ent->d_name, "event", 5 ) != 0 )
-								continue;
-
-							std::string name( ent->d_name );
-							if ( knownDevices.count( name ) )
-								continue;
-
-							// Check if this is a container device by reading phys
-							char physPath[PATH_MAX];
-							snprintf( physPath, sizeof(physPath),
-								"/sys/class/input/%s/device/phys", ent->d_name );
-							FILE *f = fopen( physPath, "r" );
-							if ( !f )
-								continue;
-							char phys[256] = {};
-							if ( !fgets( phys, sizeof(phys), f ) ) { fclose(f); continue; }
-							fclose( f );
-							// Strip newline
-							char *nl = strchr( phys, '\n' );
-							if ( nl ) *nl = '\0';
-
-							if ( strncmp( phys, "container-", 10 ) != 0 )
-								continue;
-
-							char devPath[PATH_MAX];
-							snprintf( devPath, sizeof(devPath), "/dev/input/%s", ent->d_name );
-
-							struct libinput_device *dev = libinput_path_add_device( m_pPathLibInput, devPath );
-							if ( dev )
-							{
-								fprintf( stderr, "[headless] added input device: %s (%s)\n", devPath, phys );
-								knownDevices.insert( name );
-							}
-						}
-						closedir( d );
-
-						// Remove stale entries: if a known device no longer exists
-						// in /dev/input/, remove it from the set so it gets re-added
-						// when Moonlight reconnects and Sunshine recreates it.
-						for ( auto it = knownDevices.begin(); it != knownDevices.end(); )
-						{
-							char checkPath[PATH_MAX];
-							snprintf( checkPath, sizeof(checkPath), "/dev/input/%s", it->c_str() );
-							if ( access( checkPath, F_OK ) != 0 )
-							{
-								fprintf( stderr, "[headless] removed stale device: /dev/input/%s\n", it->c_str() );
-								it = knownDevices.erase( it );
-							}
-							else
-								++it;
-						}
-					}
-
-					// Dispatch pending events
 					libinput_dispatch( m_pPathLibInput );
 					struct libinput_event *ev;
 					while ( ( ev = libinput_get_event( m_pPathLibInput ) ) )
@@ -413,9 +432,20 @@ namespace gamescope
 						libinput_event_destroy( ev );
 					}
 
-					// Use libinput's fd for event-driven wakeup instead of fixed polling
+					auto tNow = std::chrono::steady_clock::now();
+					if ( tNow >= tNextScan )
+					{
+						scan_devices();
+						tNextScan = tNow + scanInterval;
+					}
+
+					// Use libinput's fd for event-driven wakeup and only rescan
+					// devices periodically, so high-rate pointer motion does not
+					// pay the cost of a /dev/input scan on every wakeup.
+					int timeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+						std::max( tNextScan - std::chrono::steady_clock::now(), std::chrono::steady_clock::duration::zero() ) ).count();
 					struct pollfd pfd = { libinput_get_fd( m_pPathLibInput ), POLLIN, 0 };
-					poll( &pfd, 1, 500 ); // wake on events, 500ms max for device scan
+					poll( &pfd, 1, timeoutMs );
 				}
 			});
 
