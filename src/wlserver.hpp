@@ -56,6 +56,7 @@ struct ResListEntry_t {
 struct wlserver_content_override;
 
 bool wlserver_is_lock_held(void);
+bool wlserver_has_active_gamescope_scanout_client(void);
 
 class gamescope_xwayland_server_t
 {
