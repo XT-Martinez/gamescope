@@ -8,6 +8,7 @@
 #include "edid.h"
 
 #include <algorithm>
+#include <cmath>
 #include <libinput.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -25,6 +26,13 @@ extern gamescope::ConVar<bool> cv_hdr_enabled;
 
 namespace gamescope
 {
+	static constexpr float k_flHeadlessDefaultDpi = 220.0f;
+
+	static int HeadlessPhysicalMmForPixels( int nPixels )
+	{
+		return std::max( 1, int( std::lround( ( float( nPixels ) * 25.4f ) / k_flHeadlessDefaultDpi ) ) );
+	}
+
     class CHeadlessConnector final : public CBaseBackendConnector
     {
     public:
@@ -52,7 +60,7 @@ namespace gamescope
 
         virtual gamescope::GamescopeScreenType GetScreenType() const override
         {
-            return GAMESCOPE_SCREEN_TYPE_INTERNAL;
+			return GAMESCOPE_SCREEN_TYPE_EXTERNAL;
         }
         virtual GamescopePanelOrientation GetCurrentOrientation() const override
         {
@@ -102,17 +110,16 @@ namespace gamescope
             displaycolorimetry_t *displayColorimetry, EOTF *displayEOTF,
             displaycolorimetry_t *outputEncodingColorimetry, EOTF *outputEncodingEOTF ) const override
         {
-			if ( g_bForceHDR10OutputDebug )
+			*displayColorimetry = displaycolorimetry_709;
+			*displayEOTF = EOTF_Gamma22;
+
+			if ( bHDR10 && GetHDRInfo().IsHDR10() )
 			{
-				*displayColorimetry = displaycolorimetry_2020;
-				*displayEOTF = EOTF_PQ;
 				*outputEncodingColorimetry = displaycolorimetry_2020;
-				*outputEncodingEOTF = EOTF_PQ;
+				*outputEncodingEOTF = GetHDRInfo().eOutputEncodingEOTF;
 			}
 			else
 			{
-				*displayColorimetry = displaycolorimetry_709;
-				*displayEOTF = EOTF_Gamma22;
 				*outputEncodingColorimetry = displaycolorimetry_709;
 				*outputEncodingEOTF = EOTF_Gamma22;
 			}
@@ -242,6 +249,15 @@ namespace gamescope
 				fprintf( stderr, "Failed to initialize Wayland session\n" );
 				return false;
 			}
+
+			const struct wlserver_output_info outputInfo = {
+				.description = "Gamescope virtual external display",
+				.phys_width = HeadlessPhysicalMmForPixels( g_nOutputWidth ),
+				.phys_height = HeadlessPhysicalMmForPixels( g_nOutputHeight ),
+			};
+			wlserver_lock();
+			wlserver_set_output_info( &outputInfo );
+			wlserver_unlock();
 
 			return true;
 		}
@@ -537,7 +553,7 @@ namespace gamescope
 		}
 		virtual IBackendConnector *GetConnector( GamescopeScreenType eScreenType ) override
 		{
-			if ( eScreenType == GAMESCOPE_SCREEN_TYPE_INTERNAL )
+			if ( eScreenType == GAMESCOPE_SCREEN_TYPE_EXTERNAL )
 				return &m_Connector;
 
 			return nullptr;
