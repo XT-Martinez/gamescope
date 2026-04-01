@@ -1487,6 +1487,29 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 {
 	assert( wlserver_is_lock_held() );
 
+	// Debug counters: log frame skip reasons every 5 seconds
+	static uint32_t dbg_calls = 0, dbg_sent = 0;
+	static uint32_t dbg_skip_commitskip = 0, dbg_skip_ratelimit = 0;
+	static uint32_t dbg_skip_outstanding = 0, dbg_skip_dupbuf = 0;
+	static uint32_t dbg_skip_nochange = 0;
+	static uint32_t dbg_bufid_same = 0;
+	static uint32_t dbg_last_bufid = 999;
+	static auto dbg_last_log = std::chrono::steady_clock::now();
+	dbg_calls++;
+	uint32_t dbg_bufid = ( g_output.nOutImage + 2 ) % 3;
+	if ( dbg_bufid == dbg_last_bufid )
+		dbg_bufid_same++;
+	dbg_last_bufid = dbg_bufid;
+	auto dbg_now = std::chrono::steady_clock::now();
+	if ( dbg_now - dbg_last_log >= std::chrono::seconds(5) )
+	{
+		if ( dbg_calls > 0 )
+			fprintf( stderr, "[scanout-debug] 5s: calls=%u sent=%u bufid_same=%u skip: nochange=%u commitskip=%u ratelimit=%u outstanding=%u dupbuf=%u\n",
+				dbg_calls, dbg_sent, dbg_bufid_same, dbg_skip_nochange, dbg_skip_commitskip, dbg_skip_ratelimit, dbg_skip_outstanding, dbg_skip_dupbuf );
+		dbg_calls = dbg_sent = dbg_skip_nochange = dbg_skip_commitskip = dbg_skip_ratelimit = dbg_skip_outstanding = dbg_skip_dupbuf = dbg_bufid_same = 0;
+		dbg_last_log = dbg_now;
+	}
+
 	// Quick check: any client that needs a new frame?
 	bool bAnyClientNeedsFrame = false;
 	for ( const auto &sc : wlserver.gamescope_scanout_clients )
@@ -1502,7 +1525,10 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 		}
 	}
 	if ( !bAnyClientNeedsFrame )
+	{
+		dbg_skip_nochange++;
 		return;
+	}
 
 	gamescope::Rc<CVulkanTexture> pTex = vulkan_get_last_output_image( false, false );
 	if ( !pTex )
@@ -1538,20 +1564,30 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 		          ulOverrideCommitId == sc.last_override_commit_id &&
 		          uInputCounter == sc.last_input_counter )
 		{
+			dbg_skip_commitskip++;
 			continue;
 		}
 
 		// Rate limiting
 		if ( sc.max_fps > 0 && tNow < sc.next_frame_time )
+		{
+			dbg_skip_ratelimit++;
 			continue;
+		}
 
 		// Don't send if client holds too many unreleased buffers (max 2 of 3 triple-buffered)
 		if ( sc.outstanding_buffer_ids.size() >= 2 )
+		{
+			dbg_skip_outstanding++;
 			continue;
+		}
 
 		// Skip if we already sent this exact buffer
 		if ( sc.outstanding_buffer_ids.count( buffer_id ) )
+		{
+			dbg_skip_dupbuf++;
 			continue;
+		}
 
 		// Send HDR metadata on change
 		if ( bHDR != sc.last_hdr_state )
@@ -1591,6 +1627,7 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 
 		// Send frame_done
 		gamescope_scanout_send_frame_done( sc.resource );
+		dbg_sent++;
 
 		// Track buffer and commit state
 		sc.outstanding_buffer_ids.insert( buffer_id );

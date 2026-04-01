@@ -8820,6 +8820,16 @@ steamcompmgr_main(int argc, char **argv)
 					case FlipType::Normal:
 					{
 						bShouldPaint = vblank && ( hasRepaint || hasRepaintNonBasePlane || bForceSyncFlip );
+
+						// Scanout export: always paint on VBlank when clients are subscribed.
+						// Without this, the headless backend only composites when the focused
+						// window commits new content (~70fps for Steam Big Picture), leaving
+						// nOutImage stale and causing dupbuf skips in the scanout export path.
+						// Compositing on every VBlank ensures buffer_id advances each frame,
+						// giving consistent framerate delivery to Sunshine.
+						if ( vblank && !bShouldPaint && !wlserver.gamescope_scanout_clients.empty() )
+							bShouldPaint = true;
+
 						break;
 					}
 
@@ -8928,6 +8938,12 @@ steamcompmgr_main(int argc, char **argv)
 
 				wlserver_lock();
 				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId, inputCounter );
+				// Flush frame events to Sunshine immediately so it can
+				// process and release_buffer before the same triple-buffer
+				// slot cycles back (every 3 VBlanks = 25ms at 120Hz).
+				// Without this, events wait for the next event loop flush,
+				// adding ~8ms to the round-trip and causing dupbuf skips.
+				wl_display_flush_clients( wlserver.display );
 				wlserver_unlock();
 			}
 		}
