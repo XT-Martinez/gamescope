@@ -5290,6 +5290,15 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	carry_override_underlay( pFocus, previousLocalFocus.overrideWindow, previousLocalFocus.overrideUnderlayWindows );
 
+	// XDG focus fallback: when no XWayland window has focus (e.g. Steam
+	// exited for a desktop-mode switch), promote the XDG focus window so
+	// native Wayland clients like labwc get painted and scanout-exported.
+	if ( !pFocus->focusWindow && g_steamcompmgr_xdg_focus.focusWindow )
+	{
+		pFocus->focusWindow = g_steamcompmgr_xdg_focus.focusWindow;
+		pFocus->overrideWindow = g_steamcompmgr_xdg_focus.overrideWindow;
+	}
+
 	// Pick overlay/notifications from root ctx
 	pFocus->overlayWindow = root_ctx->focus.overlayWindow;
 	pFocus->externalOverlayWindow = nullptr;
@@ -9581,6 +9590,11 @@ void steamcompmgr_check_xdg(bool vblank, uint64_t vblank_idx)
 		if (s_PipewireFocus.focusWindow && s_PipewireFocus.focusWindow->type == steamcompmgr_win_type_t::XDG)
 			s_PipewireFocus.focusWindow = nullptr;
 #endif
+		// Also clear the XDG focus itself so the XDG fallback in
+		// determine_and_apply_focus() does not promote a stale window
+		// before re-evaluation runs.
+		g_steamcompmgr_xdg_focus.focusWindow = nullptr;
+		g_steamcompmgr_xdg_focus.overrideWindow = nullptr;
 		g_steamcompmgr_xdg_wins = wlserver_get_xdg_shell_windows();
 		MakeFocusDirty();
 	}
