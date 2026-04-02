@@ -121,6 +121,7 @@ struct wlr_surface *wlserver_surface_to_main_surface( struct wlr_surface *pSurfa
 bool wlserver_process_hotkeys( wlr_keyboard *keyboard, uint32_t key, bool press );
 
 extern std::atomic<bool> hasRepaint;
+extern std::atomic<bool> g_bDPMSWakeRequest;
 
 std::vector<ResListEntry_t>& gamescope_xwayland_server_t::retrieve_commits()
 {
@@ -312,6 +313,9 @@ bool env_gs_enable_ctrl_12 = getenv("GS_ENABLE_CTRL_12") ? (getenv("GS_ENABLE_CT
 
 static void wlserver_handle_key(struct wl_listener *listener, void *data)
 {
+	// Wake from DPMS on any key press (container has no power button).
+	g_bDPMSWakeRequest = true;
+
 	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
 	struct wlr_keyboard_key_event *event = (struct wlr_keyboard_key_event *) data;
 
@@ -388,6 +392,9 @@ static void wlserver_perform_rel_pointer_motion(double unaccel_dx, double unacce
 
 static void wlserver_handle_pointer_motion(struct wl_listener *listener, void *data)
 {
+	// Wake from DPMS on mouse movement (container has no power button).
+	g_bDPMSWakeRequest = true;
+
 	struct wlr_pointer_motion_event *event = (struct wlr_pointer_motion_event *) data;
 
 	wlserver.physical_cursor_move = true;
@@ -1653,6 +1660,10 @@ static void gamescope_scanout_handle_destroy( struct wl_client *client, struct w
 
 static void gamescope_scanout_handle_subscribe( struct wl_client *client, struct wl_resource *resource, uint32_t max_fps, uint32_t flags )
 {
+	// Wake from DPMS when a streaming client connects — in a container
+	// this is the equivalent of pressing the power button.
+	g_bDPMSWakeRequest = true;
+
 	for ( auto &sc : wlserver.gamescope_scanout_clients )
 	{
 		if ( sc.resource == resource )
