@@ -2061,17 +2061,23 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 	struct wlserver_xdg_surface_info* info =
 		wl_container_of(listener, info, destroy);
 
+	// get_wl_surface_info may return nullptr if the wl_surface was already
+	// destroyed (handle_wl_surface_destroy nulls wlr_surface->data).  This
+	// happens on abrupt client disconnects where wl_surface cleanup runs
+	// before xdg_surface cleanup.  We must NOT return early — the window
+	// still needs to be removed from xdg_wins and main_surface must be
+	// nulled to avoid a dangling pointer that crashes steamcompmgr.
 	wlserver_wl_surface_info *wlserver_surface = get_wl_surface_info(info->main_surface);
 	if (!wlserver_surface)
 	{
 		wl_log.infof("No base surface info. (destroy)");
-		return;
 	}
 
 	{
 		std::unique_lock lock(g_wlserver_xdg_shell_windows_lock);
 		std::erase_if(wlserver.xdg_wins, [=](auto win) { return win.get() == info->win; });
 	}
+	wlserver.xdg_dirty = true;
 	info->main_surface = nullptr;
 	info->win = nullptr;
 	info->xdg_surface = nullptr;
@@ -2082,7 +2088,8 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&info->unmap.link);
 	wl_list_remove(&info->destroy.link);
 
-	wlserver_surface->xdg_surface = nullptr;
+	if (wlserver_surface)
+		wlserver_surface->xdg_surface = nullptr;
 }
 
 void xdg_toplevel_new(struct wl_listener *listener, void *data)
