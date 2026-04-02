@@ -199,6 +199,7 @@ bool b_bForceFrameLimit = false;
 bool g_bRefreshHalveEnable = false;
 bool g_bDPMS = false;
 bool g_bDPMS_set = false;
+std::atomic<bool> g_bDPMSWakeRequest = false;
 
 namespace gamescope
 {
@@ -8906,6 +8907,27 @@ steamcompmgr_main(int argc, char **argv)
 			else
 			{
 				bShouldPaint = false;
+			}
+
+			// Container wake-on-connect: when a streaming client subscribes
+			// or sends input while DPMS is active, clear DPMS so the
+			// display resumes.  Real hardware would use a power button;
+			// in a headless container the Moonlight connection is the
+			// equivalent wake signal.
+			if ( g_bDPMS && g_bDPMSWakeRequest.exchange( false ) )
+			{
+				g_bDPMS = false;
+
+				gamescope_xwayland_server_t *root_server = wlserver_get_xwayland_server(0);
+				if ( root_server && root_server->ctx )
+				{
+					xwayland_ctx_t *ctx = root_server->ctx.get();
+					uint32_t zero = 0;
+					XChangeProperty( ctx->dpy, ctx->root, ctx->atoms.gamescopeDPMS,
+						XA_CARDINAL, 32, PropModeReplace,
+						(unsigned char *)&zero, 1 );
+					XFlush( ctx->dpy );
+				}
 			}
 
 			if ( g_bDPMS != g_bDPMS_set && vblank )
