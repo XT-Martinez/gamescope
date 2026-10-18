@@ -35,6 +35,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
+#include "types/wlr_keyboard.h"
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_touch.h>
@@ -2510,6 +2511,8 @@ static void wlserver_update_keymap()
 		// the group, so AltGr would still arrive as the layout it joined with. Each one
 		// is checked on its own, so a keyboard we failed to update is retried next time.
 		wlserver_set_keyboard_keymap( &wlserver.keyboard_group->keyboard, keymap );
+		if ( wlserver.wlr.virtual_keyboard_device )
+			wlserver_set_keyboard_keymap( wlserver.wlr.virtual_keyboard_device, keymap );
 		for ( struct wlserver_keyboard *pKeyboard : s_Keyboards )
 			wlserver_set_keyboard_keymap( pKeyboard->wlr, keymap );
 	}
@@ -2661,8 +2664,12 @@ bool wlserver_init( void ) {
 #endif
 	}
 
-	// Create a stub wlr_keyboard only used to set the keymap
-	// We need to wait for the backend to be started before adding the device
+	// Create a stub wlr_keyboard used for keyboard focus enter events.
+	// We need to wait for the backend to be started before adding the device.
+	// It must share the keymap of the keyboard group (see wlserver_update_keymap):
+	// otherwise wlr_seat_set_keyboard sends a keymap change to the focused surface,
+	// which resets its XKB state and drops held modifiers (Alt+Tab etc. in
+	// nested compositors like labwc).
 	struct wlr_keyboard *kbd = (struct wlr_keyboard *) calloc(1, sizeof(*kbd));
 	wlr_keyboard_init(kbd, nullptr, "virtual");
 	wlserver.wlr.virtual_keyboard_device = kbd;
@@ -3119,11 +3126,27 @@ void wlserver_key( uint32_t key, bool press, uint32_t time )
 	assert( wlserver_is_lock_held() );
 
 	wlr_keyboard *keyboard = wlserver.wlr.virtual_keyboard_device;
+	assert( keyboard != nullptr );
+
+	// Synthetic input bypasses wlroots' normal keyboard backend, so update
+	// its XKB state explicitly before forwarding the event. Do not emit a
+	// keyboard event here: the seat below is the sole client-facing path.
+	struct wlr_keyboard_key_event event = {
+		.time_msec = time,
+		.keycode = key,
+		.update_state = true,
+		.state = press ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
+	};
+	keyboard_key_update( keyboard, &event );
+	xkb_state_update_key( keyboard->xkb_state, key + 8,
+		press ? XKB_KEY_DOWN : XKB_KEY_UP );
+	keyboard_modifier_update( keyboard );
+	keyboard_led_update( keyboard );
 
 	if ( !wlserver_process_hotkeys( keyboard, key, press ) )
 	{
-		assert( keyboard != nullptr );
 		wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
+		wlr_seat_keyboard_notify_modifiers( wlserver.wlr.seat, &keyboard->modifiers );
 		wlr_seat_keyboard_notify_key( wlserver.wlr.seat, time, key, press );
 	}
 
