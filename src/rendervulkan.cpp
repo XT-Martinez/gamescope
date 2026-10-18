@@ -4695,13 +4695,19 @@ gamescope::Rc<CVulkanTexture> vulkan_get_last_output_image( bool partial, bool d
 
 	uint32_t nOutImage = defer ? nDeferredImage : nRegularImage;
 
+	// Output images may not be allocated yet (e.g. headless before the first
+	// composite, when a scanout export client already asks for a frame).
 	if ( partial )
 	{
 
 		//vk_log.infof( "Partial overlay frame: %d", nDeferredImage );
+		if ( nOutImage >= g_output.outputImagesPartialOverlay.size() )
+			return nullptr;
 		return g_output.outputImagesPartialOverlay[ nOutImage ];
 	}
 
+	if ( nOutImage >= g_output.outputImages.size() )
+		return nullptr;
 
 	return g_output.outputImages[ nOutImage ];
 }
