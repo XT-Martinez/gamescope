@@ -7,6 +7,7 @@
 
 #include "log.hpp"
 #include "backend.h"
+#include "main.hpp"
 #include "wlserver.hpp"
 #include "Utils/Defer.h"
 
@@ -122,8 +123,11 @@ namespace gamescope
                 {
                     libinput_event_pointer *pPointerEvent = libinput_event_get_pointer_event( pEvent );
 
-                    double flX = libinput_event_pointer_get_absolute_x( pPointerEvent );
-                    double flY = libinput_event_pointer_get_absolute_y( pPointerEvent );
+                    // libinput's untransformed absolute coordinates are in
+                    // device units (Sunshine uses 0..19200 x 0..12000).
+                    // wlserver_mousewarp expects output-pixel coordinates.
+                    double flX = libinput_event_pointer_get_absolute_x_transformed( pPointerEvent, g_nOutputWidth );
+                    double flY = libinput_event_pointer_get_absolute_y_transformed( pPointerEvent, g_nOutputHeight );
 
                     GetBackend()->NotifyPhysicalInput( InputType::Mouse );
 
