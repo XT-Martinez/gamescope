@@ -17,6 +17,9 @@
 #include <thread>
 #include <set>
 #include <string>
+#include <map>
+#include <mutex>
+#include <vector>
 
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
@@ -542,10 +545,54 @@ namespace gamescope
 		}
 		virtual std::span<const uint64_t> GetSupportedModifiers( uint32_t uDrmFormat ) const override
 		{
-			// Headless backend has no real display — use LINEAR for all formats.
-			// LINEAR is universally importable by any DMA-BUF consumer.
-			static const uint64_t s_LinearModifier = DRM_FORMAT_MOD_LINEAR;
-			return std::span<const uint64_t>{ &s_LinearModifier, 1 };
+			// Headless has no display planes to constrain modifiers, so offer
+			// every modifier the GPU can sample for this format: clients (Steam,
+			// games) then render to tiled/compressed buffers instead of LINEAR,
+			// and output images are created tiled and exported with their real
+			// modifier, which scanout export consumers (Sunshine) import as-is.
+			// Queried from Vulkan directly rather than via
+			// GetSupportedSampleModifiers(), which is built from this function
+			// during vulkan_init_formats() and is empty until then.  LINEAR is
+			// always included so the list is never empty.
+			std::scoped_lock lock( m_ModifierMutex );
+			auto iter = m_SupportedModifiers.find( uDrmFormat );
+			if ( iter == m_SupportedModifiers.end() )
+				iter = m_SupportedModifiers.emplace( uDrmFormat, QuerySampleModifiers( uDrmFormat ) ).first;
+			return std::span<const uint64_t>{ iter->second.begin(), iter->second.end() };
+		}
+
+		static std::vector<uint64_t> QuerySampleModifiers( uint32_t uDrmFormat )
+		{
+			std::vector<uint64_t> modifiers;
+
+			VkFormat format = DRMFormatToVulkan( uDrmFormat, false );
+			if ( format != VK_FORMAT_UNDEFINED && g_device.supportsModifiers() )
+			{
+				VkDrmFormatModifierPropertiesListEXT modifierPropList = {
+					.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+				};
+				VkFormatProperties2 formatProps = {
+					.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+					.pNext = &modifierPropList,
+				};
+				g_device.vk.GetPhysicalDeviceFormatProperties2( g_device.physDev(), format, &formatProps );
+
+				std::vector<VkDrmFormatModifierPropertiesEXT> props( modifierPropList.drmFormatModifierCount );
+				modifierPropList.pDrmFormatModifierProperties = props.data();
+				if ( !props.empty() )
+					g_device.vk.GetPhysicalDeviceFormatProperties2( g_device.physDev(), format, &formatProps );
+
+				for ( const VkDrmFormatModifierPropertiesEXT &prop : props )
+				{
+					if ( prop.drmFormatModifier == DRM_FORMAT_MOD_LINEAR )
+						continue;
+					if ( prop.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT )
+						modifiers.push_back( prop.drmFormatModifier );
+				}
+			}
+
+			modifiers.push_back( DRM_FORMAT_MOD_LINEAR );
+			return modifiers;
 		}
 
 		virtual IBackendConnector *GetCurrentConnector() override
@@ -649,6 +696,10 @@ namespace gamescope
         struct libinput *m_pPathLibInput = nullptr;
         std::thread m_InputThread;
         bool m_bInputThreadRunning = false;
+
+        // Per-DRM-format modifier lists for GetSupportedModifiers (filled on first use)
+        mutable std::mutex m_ModifierMutex;
+        mutable std::map<uint32_t, std::vector<uint64_t>> m_SupportedModifiers;
 	};
 
 	/////////////////////////
