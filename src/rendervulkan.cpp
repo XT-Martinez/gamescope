@@ -2259,11 +2259,15 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 			numPossibleModifiers = modifiers.size();
 		}
 
-		// GAMESCOPE_UNCOMPRESSED_OUTPUT=1: keep output images to single-plane
-		// (uncompressed, e.g. no AMD DCC) modifiers, so scanout export consumers
-		// can hand them straight to a video encoder, which cannot read
-		// compressed surfaces.
-		static const bool s_bUncompressedOutput = env_to_bool( getenv( "GAMESCOPE_UNCOMPRESSED_OUTPUT" ) );
+		// Keep output images to single-plane (uncompressed, e.g. no AMD DCC)
+		// modifiers, so scanout export consumers can hand them straight to a
+		// video encoder, which cannot read compressed surfaces.
+		// GAMESCOPE_UNCOMPRESSED_OUTPUT=0 allows compressed output again.
+		static const bool s_bUncompressedOutput = []
+		{
+			const char *pszEnv = getenv( "GAMESCOPE_UNCOMPRESSED_OUTPUT" );
+			return !pszEnv || !*pszEnv || env_to_bool( pszEnv );
+		}();
 		std::vector<VkDrmFormatModifierPropertiesEXT> modifierProps;
 		if ( flags.bOutputImage && s_bUncompressedOutput )
 		{
