@@ -6933,10 +6933,21 @@ static bool steamcompmgr_should_vblank_window( bool bShouldLimitFPS, uint64_t vb
 	if ( GetBackend()->GetCurrentConnector() && GetBackend()->GetCurrentConnector()->IsVRRActive() )
 	{
 		bool bCloseEnough = std::abs( g_nSteamCompMgrTargetFPS - nRefreshHz ) < 2;
+		bool bLimit = g_nSteamCompMgrTargetFPS && (bShouldLimitFPS || b_bForceFrameLimit) && !bCloseEnough;
+		uint64_t ulCycle = g_SteamCompMgrLimitedAppRefreshCycle;
 
-		if ( g_nSteamCompMgrTargetFPS && (bShouldLimitFPS || b_bForceFrameLimit)  && w && !bCloseEnough )
+		// A display that doesn't pace presents (headless) leaves the limiter as
+		// the only pace, so keep it on at the refresh rate, with no Steam limit too.
+		if ( !GetBackend()->GetCurrentConnector()->PacesPresents() && (bShouldLimitFPS || b_bForceFrameLimit) )
 		{
-			uint64_t schedule = w->last_commit_first_latch_time + g_SteamCompMgrLimitedAppRefreshCycle;
+			bLimit = true;
+			if ( !g_nSteamCompMgrTargetFPS )
+				ulCycle = g_SteamCompMgrAppRefreshCycle;
+		}
+
+		if ( bLimit && w )
+		{
+			uint64_t schedule = w->last_commit_first_latch_time + ulCycle;
 
 			if ( now + k_ulVRRScheduleFudge < schedule )
 			{

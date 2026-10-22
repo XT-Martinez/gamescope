@@ -188,6 +188,10 @@ namespace gamescope
 
         virtual bool SupportsVRR() const = 0;
 
+        // Whether Present() waits for the display. When false (headless),
+        // the frame limiter is the only thing pacing the focused app.
+        virtual bool PacesPresents() const { return true; }
+
         virtual std::span<const uint8_t> GetRawEDID() const = 0;
         virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const = 0;
 

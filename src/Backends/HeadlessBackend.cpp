@@ -27,6 +27,7 @@ extern int g_nPreferredOutputHeight;
 extern bool g_bForceHDR10OutputDebug;
 extern int g_nDynamicRefreshHz;
 extern gamescope::ConVar<bool> cv_hdr_enabled;
+extern gamescope::ConVar<bool> cv_adaptive_sync;
 
 namespace gamescope
 {
@@ -84,14 +85,24 @@ namespace gamescope
         }
 		virtual bool IsVRRActive() const override
 		{
-			return false;
+			// No scanout to wait for, so "supported" and "active" both mean
+			// "asked for" (--adaptive-sync or Steam's toggle).
+			return cv_adaptive_sync;
 		}
         virtual std::span<const BackendMode> GetModes() const override
         {
             return std::span<const BackendMode>{ &m_CurrentMode, 1 };
         }
 
+        // The vblank here is a timer. With VRR on, steamcompmgr paints each
+        // game commit as it lands instead of holding it for the next tick.
         virtual bool SupportsVRR() const override
+        {
+            return true;
+        }
+
+        // Present() returns at once, so nothing paces the game but the limiter.
+        virtual bool PacesPresents() const override
         {
             return false;
         }
