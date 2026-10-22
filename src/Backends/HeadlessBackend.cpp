@@ -363,6 +363,9 @@ namespace gamescope
 				const auto scanInterval = std::chrono::milliseconds( 500 );
 				auto tNextScan = std::chrono::steady_clock::now();
 
+				// Events carry libinput's millisecond timestamps: clients
+				// compare them, e.g. labwc ignores a menu click whose release
+				// comes less than 250 ms after the press.
 				while ( m_bInputThreadRunning )
 				{
 					libinput_dispatch( m_pPathLibInput );
@@ -377,7 +380,20 @@ namespace gamescope
 								auto *pe = libinput_event_get_pointer_event( ev );
 								wlserver_lock();
 								wlserver_mousemotion( libinput_event_pointer_get_dx( pe ),
-								                      libinput_event_pointer_get_dy( pe ), 0 );
+								                      libinput_event_pointer_get_dy( pe ),
+								                      libinput_event_pointer_get_time( pe ) );
+								wlserver_unlock();
+								break;
+							}
+							case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+							{
+								// Sunshine's absolute mouse (Moonlight's absolute
+								// mouse mode); scale device units to output pixels.
+								auto *pe = libinput_event_get_pointer_event( ev );
+								wlserver_lock();
+								wlserver_mousewarp( libinput_event_pointer_get_absolute_x_transformed( pe, g_nOutputWidth ),
+								                    libinput_event_pointer_get_absolute_y_transformed( pe, g_nOutputHeight ),
+								                    libinput_event_pointer_get_time( pe ), true );
 								wlserver_unlock();
 								break;
 							}
@@ -386,7 +402,8 @@ namespace gamescope
 								auto *pe = libinput_event_get_pointer_event( ev );
 								wlserver_lock();
 								wlserver_mousebutton( libinput_event_pointer_get_button( pe ),
-								                      libinput_event_pointer_get_button_state( pe ) == LIBINPUT_BUTTON_STATE_PRESSED, 0 );
+								                      libinput_event_pointer_get_button_state( pe ) == LIBINPUT_BUTTON_STATE_PRESSED,
+								                      libinput_event_pointer_get_time( pe ) );
 								wlserver_unlock();
 								break;
 							}
@@ -401,7 +418,7 @@ namespace gamescope
 								if ( sx != 0 || sy != 0 )
 								{
 									wlserver_lock();
-									wlserver_mousewheel( sx, sy, 0 );
+									wlserver_mousewheel( sx, sy, libinput_event_pointer_get_time( pe ) );
 									wlserver_unlock();
 								}
 								break;
@@ -411,7 +428,8 @@ namespace gamescope
 								auto *ke = libinput_event_get_keyboard_event( ev );
 								wlserver_lock();
 								wlserver_key( libinput_event_keyboard_get_key( ke ),
-								              libinput_event_keyboard_get_key_state( ke ) == LIBINPUT_KEY_STATE_PRESSED, 0 );
+								              libinput_event_keyboard_get_key_state( ke ) == LIBINPUT_KEY_STATE_PRESSED,
+								              libinput_event_keyboard_get_time( ke ) );
 								wlserver_unlock();
 								break;
 							}
