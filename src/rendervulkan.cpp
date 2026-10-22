@@ -2259,12 +2259,46 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 			numPossibleModifiers = modifiers.size();
 		}
 
+		// GAMESCOPE_UNCOMPRESSED_OUTPUT=1: keep output images to single-plane
+		// (uncompressed, e.g. no AMD DCC) modifiers, so scanout export consumers
+		// can hand them straight to a video encoder, which cannot read
+		// compressed surfaces.
+		static const bool s_bUncompressedOutput = env_to_bool( getenv( "GAMESCOPE_UNCOMPRESSED_OUTPUT" ) );
+		std::vector<VkDrmFormatModifierPropertiesEXT> modifierProps;
+		if ( flags.bOutputImage && s_bUncompressedOutput )
+		{
+			VkDrmFormatModifierPropertiesListEXT modifierPropList = {
+				.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+			};
+			VkFormatProperties2 formatProps = {
+				.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+				.pNext = &modifierPropList,
+			};
+			g_device.vk.GetPhysicalDeviceFormatProperties2( g_device.physDev(), imageInfo.format, &formatProps );
+			modifierProps.resize( modifierPropList.drmFormatModifierCount );
+			modifierPropList.pDrmFormatModifierProperties = modifierProps.data();
+			if ( !modifierProps.empty() )
+				g_device.vk.GetPhysicalDeviceFormatProperties2( g_device.physDev(), imageInfo.format, &formatProps );
+		}
+		auto IsCompressed = [&]( uint64_t modifier ) -> bool
+		{
+			for ( const VkDrmFormatModifierPropertiesEXT &prop : modifierProps )
+			{
+				if ( prop.drmFormatModifier == modifier )
+					return prop.drmFormatModifierPlaneCount > 1;
+			}
+			return false;
+		};
+
 		auto CollectModifiers = [&]() -> bool
 		{
 			modifiers.clear();
 			for ( size_t i = 0; i < numPossibleModifiers; i++ )
 			{
 				uint64_t modifier = possibleModifiers[i];
+
+				if ( IsCompressed( modifier ) )
+					continue;
 
 				VkExternalImageFormatProperties externalFormatProps = {
 					.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
