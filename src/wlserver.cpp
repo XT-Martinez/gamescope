@@ -1677,6 +1677,7 @@ static void gamescope_scanout_handle_subscribe( struct wl_client *client, struct
 			sc.last_focus_commit_id = 0;
 			sc.last_override_commit_id = 0;
 			sc.last_input_counter = 0;
+			sc.last_paint_count = 0;
 			sc.outstanding_buffer_ids.clear();
 			sc.force_send_frames = 3;  // send first 3 frames regardless of commit-skip
 			return;
@@ -1737,6 +1738,7 @@ static void gamescope_scanout_bind( struct wl_client *client, void *data, uint32
 	sc.last_focus_commit_id = 0;
 	sc.last_override_commit_id = 0;
 	sc.last_input_counter = 0;
+	sc.last_paint_count = 0;
 	sc.force_send_frames = 0;
 	wlserver.gamescope_scanout_clients.push_back( sc );
 }
@@ -1757,7 +1759,7 @@ bool wlserver_has_active_gamescope_scanout_client(void)
 	return false;
 }
 
-void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId, uint32_t uInputCounter )
+void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId, uint32_t uInputCounter, uint64_t ulPaintCount )
 {
 	assert( wlserver_is_lock_held() );
 
@@ -1769,7 +1771,8 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 		     ( sc.force_send_frames > 0 ||
 		       ulFocusCommitId != sc.last_focus_commit_id ||
 		       ulOverrideCommitId != sc.last_override_commit_id ||
-		       uInputCounter != sc.last_input_counter ) )
+		       uInputCounter != sc.last_input_counter ||
+		       ulPaintCount != sc.last_paint_count ) )
 		{
 			bAnyClientNeedsFrame = true;
 			break;
@@ -1810,7 +1813,8 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 		}
 		else if ( ulFocusCommitId == sc.last_focus_commit_id &&
 		          ulOverrideCommitId == sc.last_override_commit_id &&
-		          uInputCounter == sc.last_input_counter )
+		          uInputCounter == sc.last_input_counter &&
+		          ulPaintCount == sc.last_paint_count )
 		{
 			continue;
 		}
@@ -1877,6 +1881,7 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 		sc.last_focus_commit_id = ulFocusCommitId;
 		sc.last_override_commit_id = ulOverrideCommitId;
 		sc.last_input_counter = uInputCounter;
+		sc.last_paint_count = ulPaintCount;
 
 		// Advance rate limiter
 		if ( sc.max_fps > 0 )

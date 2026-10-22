@@ -231,6 +231,7 @@ struct wlserver_t {
 		uint64_t last_focus_commit_id;
 		uint64_t last_override_commit_id;
 		uint32_t last_input_counter;
+		uint64_t last_paint_count; // compositor paints, so cursor-only repaints are sent too
 		uint32_t force_send_frames;  // bypass commit-skip for N frames after subscribe
 	};
 	std::vector<gamescope_scanout_client> gamescope_scanout_clients;
@@ -365,7 +366,7 @@ void wlserver_send_gamescope_control( wl_resource *control );
 void wlserver_set_frame_limiter_state( uint32_t uState );
 uint32_t wlserver_get_frame_limiter_state( void );
 void wlserver_flush_frame_limiter_state( void );
-void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId, uint32_t uInputCounter );
+void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideCommitId, uint32_t uInputCounter, uint64_t ulPaintCount );
 
 bool wlsession_active();
 

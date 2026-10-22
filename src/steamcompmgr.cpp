@@ -142,6 +142,11 @@ bool ShouldDrawCursor();
 
 static constexpr uint64_t k_ulScanoutCursorRepaintWindow = 200'000'000ull;
 
+// Compositor paints, for scanout export. A repaint can change the output
+// without any client commit or counted input: the headless backend's libinput
+// pointer motion moves the software cursor without bumping inputCounter.
+static uint64_t s_ulScanoutPaintCount = 0;
+
 static bool ShouldForceScanoutCursorRepaint()
 {
 	if ( !wlserver_has_active_gamescope_scanout_client() )
@@ -11056,6 +11061,7 @@ steamcompmgr_main(int argc, char **argv)
 			if ( bShouldPaint )
 			{
 				paint_all( pPaintFocus, eFlipType == FlipType::Async, g_bDPMS );
+				s_ulScanoutPaintCount++;
 				
 				g_bDPMS_set = g_bDPMS;
 				bPainted = true;
@@ -11116,7 +11122,7 @@ steamcompmgr_main(int argc, char **argv)
 				}
 
 				wlserver_lock();
-				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId, inputCounter );
+				wlserver_scanout_send_frame( ulFocusCommitId, ulOverrideCommitId, inputCounter, s_ulScanoutPaintCount );
 				// Flush frame events to Sunshine immediately so it can
 				// process and release_buffer before the same triple-buffer
 				// slot cycles back (every 3 VBlanks = 25ms at 120Hz).
