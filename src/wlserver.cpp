@@ -2157,6 +2157,11 @@ bool wlsession_init( void ) {
 
 	wlserver.display = wl_display_create();
 	wlserver.event_loop = wl_display_get_event_loop( wlserver.display );
+	// libwayland disconnects a client once its event buffer fills (4 KiB by
+	// default). Pointer motion fills that in well under a second, so a client
+	// that stalls briefly, like a nested compositor reloading its theme,
+	// would be dropped while the user moves the mouse.
+	wl_display_set_default_max_buffer_size( wlserver.display, 1024 * 1024 );
 	wlserver.wlr.headless_backend = wlr_headless_backend_create( wlserver.event_loop );
 
 	wl_display_set_global_filter(wlserver.display, filter_global, nullptr);
