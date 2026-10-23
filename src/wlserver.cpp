@@ -1864,14 +1864,10 @@ void wlserver_scanout_send_frame( uint64_t ulFocusCommitId, uint64_t ulOverrideC
 			(uint32_t)( timestamp_ns & 0xFFFFFFFF ),
 			colorspace );
 
-		// Send plane events (dup FDs - Wayland closes them after marshalling)
+		// Send plane events. libwayland dups the FD for the message and
+		// closes only its own copy, so pass the texture's FD directly.
 		for ( int i = 0; i < dmabuf.n_planes; i++ )
-		{
-			int fd = dup( dmabuf.fd[i] );
-			if ( fd < 0 )
-				continue;
-			gamescope_scanout_send_plane( sc.resource, fd, dmabuf.stride[i], dmabuf.offset[i] );
-		}
+			gamescope_scanout_send_plane( sc.resource, dmabuf.fd[i], dmabuf.stride[i], dmabuf.offset[i] );
 
 		// Send frame_done
 		gamescope_scanout_send_frame_done( sc.resource );
