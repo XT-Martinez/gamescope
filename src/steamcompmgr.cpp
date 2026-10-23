@@ -330,6 +330,7 @@ update_runtime_info();
 gamescope::ConVar<bool> cv_adaptive_sync( "adaptive_sync", false, "Whether or not adaptive sync is enabled if available." );
 gamescope::ConVar<bool> cv_adaptive_sync_ignore_overlay( "adaptive_sync_ignore_overlay", false, "Whether or not to ignore overlay planes for pushing commits with adaptive sync." );
 gamescope::ConVar<int> cv_adaptive_sync_overlay_cycles( "adaptive_sync_overlay_cycles", 1, "Number of vblank cycles to ignore overlay repaints before forcing a commit with adaptive sync." );
+gamescope::ConVar<bool> cv_scanout_send_on_vrr_paint( "scanout_send_on_vrr_paint", true, "With adaptive sync, send scanout export frames right after painting instead of on the next vblank timer tick." );
 gamescope::ConVar<bool> cv_adaptive_sync_uncapped( "adaptive_sync_uncapped", true, "Whether or not to allow mailbox/immediate clients to run uncapped with adaptive sync by deferring paints until the display can take a new flip." );
 
 gamescope::ConVar<bool> cv_upscale_preemptive( "upscale_preemptive", true, "Allow pre-emptive upscaling" );
@@ -1145,6 +1146,9 @@ uint32_t		lastPublishedInputCounter;
 
 std::atomic<bool> hasRepaint = false;
 bool			hasRepaintNonBasePlane = false;
+// A non-base-plane repaint other than the external overlay (mangoapp), which
+// redraws every refresh: scanout export clients only need frames for these.
+bool			hasRepaintScanoutOverlay = false;
 
 bool			g_bUpdateForwardedVROverlays = false;
 
@@ -2090,6 +2094,7 @@ void MouseCursor::checkSuspension()
 			// We're hiding the cursor, force redraw if we were showing it
 			if (window && !m_imageEmpty ) {
 				hasRepaintNonBasePlane = true;
+				hasRepaintScanoutOverlay = true;
 				nudge_steamcompmgr();
 			}
 		}
@@ -5382,7 +5387,10 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	// After the VR forwarder has had its say, since it clears both.
 	if ( pFocus->decorationWindows != previousLocalFocus.decorationWindows ||
 		 pFocus->overrideUnderlayWindows != previousLocalFocus.overrideUnderlayWindows )
+	{
 		hasRepaintNonBasePlane = true;
+		hasRepaintScanoutOverlay = true;
+	}
 
 	// Pick cursor from our input focus window
 
@@ -7016,6 +7024,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 				if ( gameFocused && ( w == ctx->focus.overlayWindow || w == ctx->focus.notificationWindow ) )
 				{
 					hasRepaintNonBasePlane = true;
+					hasRepaintScanoutOverlay = true;
 				}
 				if ( w->isExternalOverlay )
 				{
@@ -8130,11 +8139,13 @@ static gamescope::CommitQueue::SelectionResult handle_done_commit( steamcompmgr_
 		if ( w == pFocus->overlayWindow && w->opacity != TRANSLUCENT )
 		{
 			hasRepaintNonBasePlane = true;
+			hasRepaintScanoutOverlay = true;
 		}
 
 		if ( w == pFocus->notificationWindow && w->opacity != TRANSLUCENT )
 		{
 			hasRepaintNonBasePlane = true;
+			hasRepaintScanoutOverlay = true;
 		}
 
 		// matt: the performance overlay in Steam will interfere with VRR if we let this repaint.
@@ -8166,6 +8177,7 @@ static gamescope::CommitQueue::SelectionResult handle_done_commit( steamcompmgr_
 			 gamescope::Algorithm::Contains( pFocus->decorationWindows, w ) )
 		{
 			hasRepaintNonBasePlane = true;
+			hasRepaintScanoutOverlay = true;
 		}
 
 		if ( w->isSteamStreamingClientVideo && pFocus->focusWindow && pFocus->focusWindow->isSteamStreamingClient )
@@ -10978,6 +10990,7 @@ steamcompmgr_main(int argc, char **argv)
 				eFlipType = FlipType::Normal;
 
 			bool bShouldPaint = false;
+			bool bScanoutCursorRepaint = false;
 
 			//if ( GetBackend()->IsVisible() )
 			if ( true )
@@ -10991,7 +11004,10 @@ steamcompmgr_main(int argc, char **argv)
 						// Keep software cursor movement smooth for active scanout clients,
 						// but don't repaint static scenes just because a stream is connected.
 						if ( vblank && !bShouldPaint && ShouldForceScanoutCursorRepaint() )
+						{
 							bShouldPaint = true;
+							bScanoutCursorRepaint = true;
+						}
 
 						break;
 					}
@@ -11072,7 +11088,14 @@ steamcompmgr_main(int argc, char **argv)
 			if ( bShouldPaint )
 			{
 				paint_all( pPaintFocus, eFlipType == FlipType::Async, g_bDPMS );
-				s_ulScanoutPaintCount++;
+
+				// Count paints that change what a scanout client would see.
+				// A paint for the external overlay alone (mangoapp redraws every
+				// refresh) doesn't count, or a static scene would stream at the
+				// refresh rate; its latest state goes out with the next frame.
+				const bool bExternalOverlayOnly = !hasRepaint && hasRepaintNonBasePlane && !hasRepaintScanoutOverlay;
+				if ( !bExternalOverlayOnly || bScanoutCursorRepaint )
+					s_ulScanoutPaintCount++;
 				
 				g_bDPMS_set = g_bDPMS;
 				bPainted = true;
@@ -11094,6 +11117,7 @@ steamcompmgr_main(int argc, char **argv)
 
 			hasRepaint = false;
 			hasRepaintNonBasePlane = false;
+			hasRepaintScanoutOverlay = false;
 			nIgnoredOverlayRepaints = 0;
 
 			{
@@ -11114,7 +11138,13 @@ steamcompmgr_main(int argc, char **argv)
 			// Juuust in case pageflip handler doesn't happen
 			// so we don't stop vblanking forever.
 			GetVBlankTimer().ArmNextVBlank( true );
+		}
 
+		// With adaptive sync a paint follows the game's commit rather than the
+		// vblank timer, so send it right away: waiting for the next tick would
+		// hold every frame for up to a refresh cycle before capture.
+		if ( bIsVBlankFromTimer || ( bVRR && bPainted && cv_scanout_send_on_vrr_paint ) )
+		{
 			// Scanout export: send frame to subscribed clients
 			// Pass commit IDs for per-client commit-skip (variable framerate)
 			// When no window has focus (e.g. Steam still starting), send with
