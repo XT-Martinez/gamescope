@@ -113,11 +113,38 @@ namespace gamescope
         }
         virtual std::span<const uint32_t> GetValidDynamicRefreshRates() const override
         {
+            if ( m_uRefreshCapHz )
+                return std::span<const uint32_t>{ m_CappedRefreshRates.data(), m_CappedRefreshRates.size() };
+            return GetConfiguredRefreshRates();
+        }
+
+        std::span<const uint32_t> GetConfiguredRefreshRates() const
+        {
             if ( !g_customRefreshRates.empty() )
                 return std::span<const uint32_t>{ g_customRefreshRates.data(), g_customRefreshRates.size() };
             if ( !m_FallbackRefreshRates.empty() )
                 return std::span<const uint32_t>{ m_FallbackRefreshRates.data(), m_FallbackRefreshRates.size() };
             return std::span<const uint32_t>{};
+        }
+
+        // A mode set through the output manager (Sunshine's set-resolution.sh
+        // sends the client's mode) caps the dynamic refresh rates. Otherwise
+        // the dynamic refresh logic moves back to the highest configured rate
+        // a second later, and a 60 Hz client gets a 120 Hz stream.
+        void SetRefreshCap( uint32_t uRefreshHz )
+        {
+            m_uRefreshCapHz = uRefreshHz;
+            m_CappedRefreshRates.clear();
+            for ( uint32_t uRate : GetConfiguredRefreshRates() )
+            {
+                if ( uRate <= uRefreshHz )
+                    m_CappedRefreshRates.push_back( uRate );
+            }
+            if ( std::find( m_CappedRefreshRates.begin(), m_CappedRefreshRates.end(), uRefreshHz ) == m_CappedRefreshRates.end() )
+            {
+                m_CappedRefreshRates.push_back( uRefreshHz );
+                std::sort( m_CappedRefreshRates.begin(), m_CappedRefreshRates.end() );
+            }
         }
 
         virtual void GetNativeColorimetry(
@@ -174,6 +201,8 @@ namespace gamescope
         BackendMode m_CurrentMode{};
         std::vector<uint8_t> m_Edid;
         std::vector<uint32_t> m_FallbackRefreshRates;
+        uint32_t m_uRefreshCapHz = 0;
+        std::vector<uint32_t> m_CappedRefreshRates;
 
         friend class CHeadlessBackend;
     };
@@ -543,9 +572,12 @@ namespace gamescope
 			g_nOutputWidth = width;
 			g_nOutputHeight = height;
 			g_nOutputRefresh = refresh_mhz;
+			g_nDynamicRefreshHz = 0;
 
 			m_Connector.UpdateMode( width, height,
 				gamescope::ConvertmHzToHz( (uint32_t)refresh_mhz ) );
+			if ( !m_Connector.GetConfiguredRefreshRates().empty() )
+				m_Connector.SetRefreshCap( gamescope::ConvertmHzToHz( (uint32_t)refresh_mhz ) );
 
 			vulkan_remake_output_images();
 
@@ -553,6 +585,9 @@ namespace gamescope
 			for ( size_t i = 0; i < wlserver.wlr.xwayland_servers.size(); i++ )
 				wlserver_set_xwayland_server_mode( i, width, height, refresh_mhz );
 			wlserver_update_output_manager();
+			// Tell Steam the new rate list so its refresh slider matches.
+			for ( const auto &control : wlserver.gamescope_controls )
+				wlserver_send_gamescope_control( control );
 			wlserver_unlock();
 
 			return true;
@@ -680,6 +715,9 @@ namespace gamescope
 		{
 			if ( nRefresh <= 0 )
 				return false;
+			// Steam may still ask for a rate it picked before the cap.
+			if ( m_Connector.m_uRefreshCapHz && (uint32_t)nRefresh > m_Connector.m_uRefreshCapHz )
+				nRefresh = (int)m_Connector.m_uRefreshCapHz;
 
 			int32_t nRefreshmHz = ConvertHztomHz( nRefresh );
 			if ( nRefreshmHz == g_nOutputRefresh )
