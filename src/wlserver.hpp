@@ -208,6 +208,7 @@ struct wlserver_t {
 	struct wlr_output_manager_v1 *output_manager;
 	struct wl_listener output_manager_apply;
 	struct wl_listener output_manager_test;
+	struct wl_listener output_manager_destroy;
 	struct wl_listener new_xdg_surface;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_layer_shell_surface;

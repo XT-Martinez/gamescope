@@ -2613,6 +2613,16 @@ static void handle_output_manager_test(struct wl_listener *listener, void *data)
 	wlr_output_configuration_v1_destroy( config );
 }
 
+// wlroots asserts on display teardown that nothing still listens to the
+// output manager, so detach our listeners when it goes away.
+static void handle_output_manager_destroy(struct wl_listener *listener, void *data)
+{
+	wl_list_remove( &wlserver.output_manager_apply.link );
+	wl_list_remove( &wlserver.output_manager_test.link );
+	wl_list_remove( &wlserver.output_manager_destroy.link );
+	wlserver.output_manager = nullptr;
+}
+
 void wlserver_update_output_manager( void )
 {
 	if ( !wlserver.output_manager )
@@ -2758,6 +2768,8 @@ bool wlserver_init( void ) {
 	wl_signal_add(&wlserver.output_manager->events.apply, &wlserver.output_manager_apply);
 	wlserver.output_manager_test.notify = handle_output_manager_test;
 	wl_signal_add(&wlserver.output_manager->events.test, &wlserver.output_manager_test);
+	wlserver.output_manager_destroy.notify = handle_output_manager_destroy;
+	wl_signal_add(&wlserver.output_manager->events.destroy, &wlserver.output_manager_destroy);
 
 	wlserver.xdg_shell = wlr_xdg_shell_create(wlserver.display, 3);
 	if (!wlserver.xdg_shell)
